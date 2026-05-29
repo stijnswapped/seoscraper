@@ -10,6 +10,12 @@ SEO/meta data and product info, downloads the product images (removing
 duplicates), and saves everything. It can also track which products rank highest
 on a best-seller listing and how that changes over time.
 
+For `/api/check-product` there are two outcomes:
+
+- a **single product result** when the URL is a product page
+- a **collection result** when the URL is a category/listing page; each discovered
+  product is scraped too and returned in `result.products`
+
 ---
 
 ## 1. Before you call anything
@@ -29,11 +35,11 @@ The API key is required. Without it you get `401`. (`x-api-key: <API_KEY>` also 
 **Always check `success` in the JSON first.** Every response is one of:
 
 ```json
-{ "success": true,  "result": { ... }, "fileBaseUrl": "/files/runs/...", "dataUrl": "/files/runs/.../data.json" }
+{ "success": true,  "result": { ... }, "fileBaseUrl": "https://…/files/runs/…", "dataUrl": "https://…/files/runs/…/data.json" }
 { "success": false, "error":  { "code": "SOME_CODE", "message": "why it failed" } }
 ```
 - If `success` is `false`, read `error.code` and stop — do not read `result`.
-- `fileBaseUrl` and `dataUrl` appear on successful scrape responses.
+- `fileBaseUrl` and `dataUrl` appear on successful scrape responses as full URLs.
 
 ---
 
@@ -67,6 +73,8 @@ Returns: `{ "ok": true }`
 
 Scrape one shop URL.
 
+### What to send
+
 **Send:**
 ```json
 { "url": "https://shop.com/products/blue-dress" }
@@ -81,12 +89,30 @@ Optional fields:
   `"url"` returns only the file URLs and a small summary, so callers can fetch
   the saved `data.json` instead of receiving a large response body.
 
+### What it does
+
+1. Validates the URL and checks the domain.
+2. Renders the page in Chromium.
+3. Extracts SEO/meta data, product data, and images.
+4. If the page is a collection/listing, it finds product URLs and scrapes those too.
+5. Writes the full result to `data.json` and the images/raw HTML to the run folder.
+6. Returns either the full JSON or just the file URLs, depending on `responseMode`.
+
+### What to expect
+
+| Page type | Result |
+|---|---|
+| Product page | `result.kind === "product"` and `result.product`, `result.images`, `result.seo` |
+| Collection page | `result.kind === "collection"` and `result.products[]` with one entry per discovered product |
+
+The saved `data.json` always contains the full final result object.
+
 **Example:**
 ```bash
 curl -X POST https://seoscrapebackend-production.up.railway.app/api/check-product \
   -H "Authorization: Bearer <API_KEY>" \
   -H "Content-Type: application/json" \
-  -d '{"url":"https://shop.com/products/blue-dress"}'
+  -d '{"url":"https://shop.com/products/blue-dress","runId":"run-001","responseMode":"url"}'
 ```
 
 **What you get back depends on `result.kind`:**
@@ -96,8 +122,8 @@ curl -X POST https://seoscrapebackend-production.up.railway.app/api/check-produc
 ```jsonc
 {
   "success": true,
-  "fileBaseUrl": "/files/runs/20260529t163141z-shop-com-60be737d",
-  "dataUrl": "/files/runs/20260529t163141z-shop-com-60be737d/data.json",
+  "fileBaseUrl": "https://seoscrapebackend-production.up.railway.app/files/runs/20260529t163141z-shop-com-60be737d",
+  "dataUrl": "https://seoscrapebackend-production.up.railway.app/files/runs/20260529t163141z-shop-com-60be737d/data.json",
   "result": {
     "kind": "product",
     "finalUrl": "https://shop.com/products/blue-dress",  // after redirects
@@ -165,8 +191,8 @@ The page was a list of products, so each product was scraped too.
 ```jsonc
 {
   "success": true,
-  "fileBaseUrl": "/files/runs/20260529t163141z-shop-com-60be737d",
-  "dataUrl": "/files/runs/20260529t163141z-shop-com-60be737d/data.json",
+  "fileBaseUrl": "https://seoscrapebackend-production.up.railway.app/files/runs/20260529t163141z-shop-com-60be737d",
+  "dataUrl": "https://seoscrapebackend-production.up.railway.app/files/runs/20260529t163141z-shop-com-60be737d/data.json",
   "result": {
     "kind": "collection",
     "finalUrl": "https://shop.com/collections/dresses",
@@ -213,25 +239,48 @@ If you want a progress feed while a scrape runs:
 2. Open this URL as a **Server-Sent Events** stream (no key needed).
 3. Call `POST /api/check-product` with that same `runId` in the body.
 
+### What you receive
+
 Each event's `data` is JSON like:
 ```json
 { "phase": "downloading-images", "message": "Downloading 8 image candidates.", "current": 3, "total": 12 }
 ```
-This is just status text. **The real answer is the JSON returned by the POST** — use
-that as the source of truth. You can ignore this endpoint entirely if you don't
-need progress.
+
+Common phases:
+
+| Phase | Meaning |
+|---|---|
+| `queued` | Request accepted |
+| `loading` | Main URL is opening in Chromium |
+| `loaded` | Initial page finished rendering |
+| `collection-discovered` | The page looks like a category/listing page |
+| `product-start` | A discovered product scrape started |
+| `product-complete` | A product scrape finished successfully |
+| `product-failed` | A product scrape failed |
+| `complete` | The request finished |
+| `failed` | The request ended in error |
+
+This stream is **status only**. The final data comes from the POST response and the saved `dataUrl`.
 
 ---
 
 ## 7. `GET /files/runs/{runId}/...` — saved files
 
-Static files from a run. No key needed. Build URLs by joining the base, the
-`fileBaseUrl` from the response, and a `filePath`:
+Static files from a run. No key needed. The response gives you full URLs already.
+Use these to fetch the saved data or images:
 
 ```
 https://seoscrapebackend-production.up.railway.app/files/runs/<id>/images/001-main.png
 https://seoscrapebackend-production.up.railway.app/files/runs/<id>/data.json      (the full result)
-https://seoscrapebackend-production.up.railway.app/files/runs/<id>/raw/page.html  (raw rendered HTML)
+https://seoscrapebackend-production.up.railway.app/files/runs/<id>/raw/page.html   (raw rendered HTML)
+
+`data.json` is the canonical output. It contains the full final `result` object,
+including:
+- SEO metadata
+- product data
+- discovered/downloaded/skipped images
+- warnings and errors
+- collection `products[]` when the input was a listing page
 ```
 
 ---
@@ -327,7 +376,8 @@ else:
 
 - Send the **API key** on every protected call. Check **`success`** first.
 - Branch product vs collection on **`result.kind`**.
-- Build image URLs as **`BASE + fileBaseUrl + "/" + filePath`**.
+- Use `dataUrl` if you want to store the final JSON outside the API.
+- Build image URLs as **`result.fileBaseUrl + "/" + filePath`**.
 - Allow up to **120s** per scrape; retry only the transient error codes.
 - Image de-duplication is deterministic (hashing + visual comparison) — no AI is
   used server-side, so results are consistent for the same input.

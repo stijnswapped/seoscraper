@@ -412,16 +412,18 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
     try {
       progress({ phase: "queued", message: "Check request accepted.", url: parsed.data.url });
       const { result, fileBaseUrl, dataUrl } = await runCheck(parsed.data.url, progress, parsed.data.maxPages);
+      const publicFileBaseUrl = toPublicUrl(request, fileBaseUrl!);
+      const publicDataUrl = toPublicUrl(request, dataUrl!);
       if (parsed.data.responseMode === "url") {
         return reply.send({
           success: true,
           kind: result.kind,
-          fileBaseUrl,
-          dataUrl,
+          fileBaseUrl: publicFileBaseUrl,
+          dataUrl: publicDataUrl,
           ...(result.kind === "collection" ? { summary: result.summary } : {}),
         });
       }
-      return reply.send({ success: true, result, fileBaseUrl, dataUrl });
+      return reply.send({ success: true, result, fileBaseUrl: publicFileBaseUrl, dataUrl: publicDataUrl });
     } catch (err) {
       if (err instanceof CheckError) {
         const status = err.code === "DOMAIN_NOT_ALLOWED" || err.code === "INVALID_URL" ? 400 : 502;
@@ -445,4 +447,13 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
       finishProgress(parsed.data.runId);
     }
   });
+}
+
+function toPublicUrl(
+  request: { protocol: string; headers: { host?: string | undefined } },
+  value: string,
+): string {
+  if (/^https?:\/\//i.test(value)) return value;
+  const host = request.headers.host ?? "localhost";
+  return new URL(value, `${request.protocol}://${host}`).toString();
 }

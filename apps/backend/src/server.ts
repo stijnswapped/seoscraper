@@ -7,7 +7,7 @@ import { registerCheckProductRoute } from "./routes/checkProduct.js";
 import { registerListingTrackerRoutes } from "./routes/listingTracker.js";
 
 export async function buildServer(): Promise<FastifyInstance> {
-  const app = Fastify({ logger: false, bodyLimit: 1_048_576 });
+  const app = Fastify({ logger: false, bodyLimit: 1_048_576, trustProxy: true });
 
   await app.register(cors, { origin: true });
 

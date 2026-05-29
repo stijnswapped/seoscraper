@@ -170,6 +170,7 @@ export const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/
 
 /** Build an absolute URL to a backend path (handles the empty-base dev case). */
 export function apiUrl(path: string): string {
+  if (/^https?:\/\//i.test(path)) return path;
   return `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
