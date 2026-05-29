@@ -1,4 +1,4 @@
-import type { DownloadedImage } from "../api.js";
+import { API_BASE, type DownloadedImage } from "../api.js";
 
 interface Props {
   images: DownloadedImage[];
@@ -14,7 +14,7 @@ export function ImageGallery({ images, fileBaseUrl }: Props) {
       {images.map((img) => (
         <figure key={img.filePath}>
           <img
-            src={`${fileBaseUrl}/${img.filePath}`}
+            src={`${API_BASE}${fileBaseUrl}/${img.filePath}`}
             alt={img.filename}
             loading="lazy"
           />

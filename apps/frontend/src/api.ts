@@ -155,8 +155,26 @@ export type CheckResponse =
   | { success: true; result: CheckResult; fileBaseUrl?: string | null }
   | { success: false; error: ApiError };
 
+/**
+ * Base URL of the backend API.
+ *
+ * - Empty in local dev: requests use relative paths that Vite's dev proxy
+ *   forwards to the backend (see vite.config.ts).
+ * - On Railway (and any deployed build) set the build-time env var
+ *   `VITE_API_BASE_URL` to the backend's PUBLIC domain, e.g.
+ *   `https://seoscrapebackend-production.up.railway.app`. The browser then
+ *   calls the backend directly. (The private *.railway.internal address does
+ *   NOT work from a browser.)
+ */
+export const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
+
+/** Build an absolute URL to a backend path (handles the empty-base dev case). */
+export function apiUrl(path: string): string {
+  return `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
 export async function checkProduct(url: string, runId?: string): Promise<CheckResponse> {
-  const res = await fetch("/api/check-product", {
+  const res = await fetch(apiUrl("/api/check-product"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ url, runId }),
@@ -165,5 +183,5 @@ export async function checkProduct(url: string, runId?: string): Promise<CheckRe
 }
 
 export function createProgressSource(runId: string): EventSource {
-  return new EventSource(`/api/check-progress/${encodeURIComponent(runId)}`);
+  return new EventSource(apiUrl(`/api/check-progress/${encodeURIComponent(runId)}`));
 }
