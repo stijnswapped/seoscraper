@@ -1,0 +1,24 @@
+# Dependencies are installed fresh inside the image.
+node_modules
+**/node_modules
+
+# Build artifacts & generated output.
+dist
+**/dist
+apps/frontend/dist
+output
+
+# Local environment & secrets (set these as Railway variables instead).
+.env
+.env.*
+!.env.example
+
+# VCS / editor / logs.
+.git
+.gitignore
+*.log
+.DS_Store
+
+# Docs are not needed at runtime.
+*.md
+docs

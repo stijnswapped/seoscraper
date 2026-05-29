@@ -35,6 +35,7 @@ import {
   finishProgress,
   type ProgressReporter,
 } from "../services/progressHub.js";
+import { requireApiKeyAuth } from "../services/apiAuth.js";
 
 const log = createLogger("checkProduct");
 
@@ -317,7 +318,7 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
     attachProgressClient(params.data.runId, reply);
   });
 
-  app.post("/api/check-product", async (request, reply) => {
+  app.post("/api/check-product", { preHandler: requireApiKeyAuth }, async (request, reply) => {
     const parsed = bodySchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({

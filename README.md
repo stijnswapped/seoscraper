@@ -520,6 +520,40 @@ If an integration must avoid long collection runs, reduce `maxProducts`.
 
 ## API To Call
 
+## Hosted Node API Mode
+
+For a Railway-style hosted backend that can run Playwright, download images, write files, and serve `/files/...`, use:
+
+```bash
+npm run dev:host
+```
+
+This starts the Node backend on `HOST=0.0.0.0` and reads Railway's `PORT` automatically.
+
+Recommended hosted environment variables:
+
+```text
+HOST=0.0.0.0
+PORT=<provided by host>
+API_KEY=<strong random secret>
+REQUIRE_API_KEY=true
+DATABASE_URL=<Postgres connection string>
+OUTPUT_DIR=/data/output
+```
+
+When `API_KEY` is set, protected API routes accept either:
+
+```text
+Authorization: Bearer <API_KEY>
+x-api-key: <API_KEY>
+```
+
+Run the Postgres migration before using listing tracking:
+
+```bash
+npm run db:migrate
+```
+
 ## `POST /api/check-product`
 
 Runs one product check or one collection check.
@@ -538,6 +572,7 @@ Example:
 ```bash
 curl -X POST http://127.0.0.1:3001/api/check-product \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $API_KEY" \
   -d '{"url":"https://example.com/products/linen-shirt"}'
 ```
 
@@ -572,6 +607,55 @@ await fetch("/api/check-product", {
 });
 
 source.close();
+```
+
+## `POST /api/listings/track`
+
+Tracks a Shopify/listing rank snapshot over time, useful for best-seller movement such as rank `80` becoming rank `2`.
+
+### Request Body
+
+```ts
+interface TrackListingRequest {
+  url: string;
+  sourceStrategy?: "auto" | "html" | "shopify_json" | "both";
+  maxProducts?: number;
+}
+```
+
+Recommended Shopify best-seller URL:
+
+```text
+https://store.com/collections/all?sort_by=best-selling
+```
+
+Example:
+
+```bash
+curl -X POST http://127.0.0.1:3001/api/listings/track \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $API_KEY" \
+  -d '{
+    "url": "https://example.com/collections/all?sort_by=best-selling",
+    "sourceStrategy": "auto",
+    "maxProducts": 100
+  }'
+```
+
+Source strategies:
+
+- `auto`: prefer rendered HTML order, enrich/fallback with Shopify JSON.
+- `html`: use Playwright-rendered listing links only.
+- `shopify_json`: use `/collections/<handle>/products.json`.
+- `both`: merge rendered HTML rank order with Shopify JSON enrichment.
+
+The endpoint stores a snapshot in Postgres and compares it with the previous snapshot for the same listing key. Changes include `previousRank`, `currentRank`, `delta`, and `direction`.
+
+Related listing endpoints:
+
+```text
+GET /api/listings/:listingId/history
+GET /api/listings/:listingId/latest
 ```
 
 ### Progress Event Shape

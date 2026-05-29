@@ -159,6 +159,57 @@ export interface CollectionCheckResult {
 
 export type CheckResult = ProductCheckResult | CollectionCheckResult;
 
+export type ListingSourceStrategy = "auto" | "html" | "shopify_json" | "both";
+export type ListingSourceUsed = "html" | "shopify_json" | "both";
+export type ListingRankDirection = "up" | "down" | "same" | "new" | "missing";
+
+export interface ListingRankItem {
+  rank: number;
+  productKey: string;
+  url: string;
+  handle?: string;
+  title?: string;
+  imageUrl?: string;
+  productId?: string;
+  source: ListingSourceUsed;
+}
+
+export interface ListingRankChange {
+  productKey: string;
+  url: string;
+  handle?: string;
+  title?: string;
+  previousRank: number | null;
+  currentRank: number | null;
+  delta: number | null;
+  direction: ListingRankDirection;
+  previousSnapshotId: string | null;
+  currentSnapshotId: string;
+}
+
+export interface ListingRankSnapshot {
+  kind: "listing_rank_snapshot";
+  snapshotId: string;
+  trackedListingId: string;
+  listingKey: string;
+  storeDomain: string;
+  listingUrl: string;
+  sourceStrategy: ListingSourceStrategy;
+  sourceUsed: ListingSourceUsed;
+  checkedAt: string;
+  items: ListingRankItem[];
+  changes: ListingRankChange[];
+  summary: {
+    tracked: number;
+    new: number;
+    movedUp: number;
+    movedDown: number;
+    unchanged: number;
+    missing: number;
+  };
+  warnings: string[];
+}
+
 /** Consistent error codes surfaced by the API. */
 export type ErrorCode =
   | "INVALID_URL"

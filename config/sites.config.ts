@@ -91,16 +91,45 @@ export interface SitesConfig {
   };
 }
 
+/** Read a boolean env var. Empty/unset falls back to the provided default. */
+function envBool(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw == null || raw.trim() === "") return fallback;
+  const v = raw.trim().toLowerCase();
+  return v === "true" || v === "1" || v === "yes";
+}
+
+/** Read a comma-separated list env var (lowercased, trimmed, non-empty). */
+function envList(name: string): string[] {
+  return (process.env[name] ?? "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+/** Read a positive integer env var, falling back when missing/invalid. */
+function envInt(name: string, fallback: number): number {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+const allowedDomainsFromEnv = envList("ALLOWED_DOMAINS");
+
 export const sitesConfig: SitesConfig = {
   // --- Domain allowlist -----------------------------------------------------
-  // Testing mode: accept all hosts for now. Flip to `false` before production.
-  allowAllDomains: true,
-  allowedDomains: [
-    // Replace these placeholders with your owned webshop hostnames, then set
-    // allowAllDomains: false to enforce the allowlist.
-    "example.com",
-    "www.example.com",
-  ],
+  // Controlled by env in deployment; defaults keep local testing permissive.
+  //   ALLOW_ALL_DOMAINS=false   -> enforce the allowlist below
+  //   ALLOWED_DOMAINS=a.com,b.com (comma-separated) -> the allowlist
+  allowAllDomains: envBool("ALLOW_ALL_DOMAINS", true),
+  allowedDomains:
+    allowedDomainsFromEnv.length > 0
+      ? allowedDomainsFromEnv
+      : [
+          // Replace these placeholders with your owned webshop hostnames, then
+          // set ALLOW_ALL_DOMAINS=false to enforce the allowlist.
+          "example.com",
+          "www.example.com",
+        ],
 
   // --- Headless browser -----------------------------------------------------
   browser: {
@@ -139,13 +168,13 @@ export const sitesConfig: SitesConfig = {
 
   // --- Output ---------------------------------------------------------------
   output: {
-    baseDir: "output",
+    baseDir: process.env.OUTPUT_DIR ?? "output",
   },
 
   // --- Future per-site overrides (generic mode = empty) ---------------------
   siteOverrides: {},
 
   collections: {
-    maxProducts: 100,
+    maxProducts: envInt("MAX_COLLECTION_PRODUCTS", 100),
   },
 };
