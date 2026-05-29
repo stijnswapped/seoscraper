@@ -32,5 +32,7 @@ RUN npm install -g serve@14
 COPY --from=build /app/apps/frontend/dist ./dist
 ENV PORT=8080
 EXPOSE 8080
+HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 \
+  CMD node -e "fetch('http://localhost:' + (process.env.PORT || 8080) + '/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 # -s = SPA fallback (any path -> index.html), so Railway's /health check also gets 200.
 CMD ["sh", "-c", "serve -s dist -l tcp://0.0.0.0:${PORT:-8080}"]
