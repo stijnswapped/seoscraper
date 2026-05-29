@@ -8,6 +8,19 @@ const log = createLogger("server");
 const PORT = Number(process.env.PORT ?? 3001);
 const HOST = process.env.HOST ?? "0.0.0.0";
 
+// Global error handlers to prevent silent crashes
+process.on("unhandledRejection", (reason, promise) => {
+  log.error("unhandled promise rejection", {
+    reason: reason instanceof Error ? reason.message : String(reason),
+    promise: String(promise),
+  });
+});
+
+process.on("uncaughtException", (err) => {
+  log.error("uncaught exception", { message: err.message, stack: err.stack });
+  process.exit(1);
+});
+
 async function main(): Promise<void> {
   const app = await buildServer();
   await app.listen({ port: PORT, host: HOST });
