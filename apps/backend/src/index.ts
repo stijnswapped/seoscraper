@@ -33,3 +33,4 @@ main().catch((err) => {
   log.error("failed to start server", { message: (err as Error).message });
   process.exit(1);
 });
+
