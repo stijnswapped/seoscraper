@@ -1,0 +1,28 @@
+{
+  "name": "seoscrape",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Internal product content & SEO checker for owned webshop domains",
+  "workspaces": [
+    "apps/backend",
+    "apps/frontend",
+    "apps/worker"
+  ],
+  "scripts": {
+    "dev": "npm-run-all --parallel dev:backend dev:frontend",
+    "dev:backend": "npm run dev --workspace apps/backend",
+    "dev:frontend": "npm run dev --workspace apps/frontend",
+    "dev:worker": "npm run dev --workspace apps/worker",
+    "deploy:worker": "npm run deploy --workspace apps/worker",
+    "build": "npm run build --workspace apps/backend && npm run build --workspace apps/frontend",
+    "test": "npm run test --workspace apps/backend",
+    "typecheck": "npm run typecheck --workspace apps/backend && npm run typecheck --workspace apps/frontend && npm run typecheck --workspace apps/worker",
+    "postinstall": "node -e \"console.log('\\n> Full Node backend: run \\\\'npx playwright install chromium\\\\' once for Playwright rendering. Cloudflare Worker mode does not need Chromium.\\n')\""
+  },
+  "devDependencies": {
+    "npm-run-all": "^4.1.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

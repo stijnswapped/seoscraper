@@ -1,0 +1,8 @@
+name = "seoscrape-worker"
+main = "src/index.ts"
+compatibility_date = "2025-05-25"
+
+[vars]
+ALLOW_ALL_DOMAINS = "true"
+ALLOWED_DOMAINS = ""
+MAX_COLLECTION_PRODUCTS = "20"
