@@ -1,83 +1,53 @@
 import type { CollectionCheckResult } from "../api.js";
 import { ResultSummary } from "./ResultSummary.js";
 
-interface Props {
-  result: CollectionCheckResult;
-}
-
-export function CollectionSummary({ result }: Props) {
+export function CollectionSummary({ result }: { result: CollectionCheckResult }) {
   return (
-    <div>
-      <div className="card">
-        <h2>
-          Collection
-          <span className="badge success">visible products</span>
-        </h2>
-        <div className="stat-grid" style={{ marginBottom: "1rem" }}>
-          <div className="stat">
-            <div className="num">{result.summary.discovered}</div>
-            <div className="label">discovered</div>
-          </div>
-          <div className="stat">
-            <div className="num">{result.summary.succeeded}</div>
-            <div className="label">scraped</div>
-          </div>
-          <div className="stat">
-            <div className="num">{result.summary.failed}</div>
-            <div className="label">failed</div>
-          </div>
+    <div className="anim">
+      <section className="card">
+        <div className="card-head">
+          <h2>Collection</h2>
+          <span className="tag ok">{result.summary.succeeded} scraped</span>
         </div>
-        <div className="field-container">
-          <div className="field-label">Collection URL</div>
-          <div className="field-value">
-            <a href={result.finalUrl} target="_blank" rel="noreferrer">{result.finalUrl}</a>
-          </div>
+        <p className="muted">
+          <a href={result.finalUrl} target="_blank" rel="noreferrer">{result.finalUrl}</a>
+        </p>
+        <div className="stats">
+          <div className="stat"><b>{result.summary.discovered}</b><span>found</span></div>
+          <div className="stat ok"><b>{result.summary.succeeded}</b><span>scraped</span></div>
+          <div className="stat down"><b>{result.summary.failed}</b><span>failed</span></div>
         </div>
-      </div>
+      </section>
 
       {result.warnings.length > 0 && (
-        <div className="card" style={{ borderColor: "rgba(245, 158, 11, 0.25)" }}>
-          <h2 style={{ color: "var(--accent-warning)" }}>Collection Warnings</h2>
+        <section className="card warn">
+          <h2>Notes</h2>
           <ul className="warnings">
-            {result.warnings.map((warning, index) => (
-              <li key={index}>{warning}</li>
+            {result.warnings.map((w, i) => (
+              <li key={i}>{w}</li>
             ))}
           </ul>
-        </div>
+        </section>
       )}
-
-      <div className="card">
-        <h2>Discovered Product URLs</h2>
-        <ol className="product-url-list">
-          {result.discoveredProductUrls.map((url) => (
-            <li key={url}>
-              <a href={url} target="_blank" rel="noreferrer">{url}</a>
-            </li>
-          ))}
-        </ol>
-      </div>
 
       {result.products.map((product, index) => (
         <div key={product.url} className="collection-product">
-          <div className="card collection-product-header">
-            <h2>
+          <div className="card-head subhead">
+            <h3>
               Product {index + 1}
-              <span className={`badge ${product.success ? "success" : "warning"}`}>
+              <span className={`tag ${product.success ? "ok" : "warn"}`}>
                 {product.success ? "scraped" : "failed"}
               </span>
-            </h2>
-            <div className="field-value">
-              <a href={product.url} target="_blank" rel="noreferrer">{product.url}</a>
-            </div>
-            {!product.success && (
-              <div className="error-banner" style={{ marginBottom: 0 }}>
-                <strong>{product.error.code}</strong>
-                {product.error.message}
-              </div>
-            )}
+            </h3>
+            <a href={product.url} target="_blank" rel="noreferrer" className="muted">{product.url}</a>
           </div>
-          {product.success && (
+          {product.success ? (
             <ResultSummary result={product.result} fileBaseUrl={product.fileBaseUrl ?? ""} />
+          ) : (
+            <div className="error">
+              <strong>{product.error.code}</strong>
+              <span>{product.error.message}</span>
+            </div>
           )}
         </div>
       ))}

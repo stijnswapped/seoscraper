@@ -6,35 +6,27 @@ interface Props {
 
 export function ProgressPanel({ events }: Props) {
   const latest = events.at(-1);
-  const progressEvent = [...events].reverse().find((event) => event.current && event.total);
-  const percentage = progressEvent?.current && progressEvent.total
-    ? Math.round((progressEvent.current / progressEvent.total) * 100)
-    : null;
+  const withCount = [...events].reverse().find((e) => e.current && e.total);
+  const pct =
+    withCount?.current && withCount.total
+      ? Math.round((withCount.current / withCount.total) * 100)
+      : null;
 
   return (
-    <div className="progress-card card">
-      <h2>
-        Live Progress
-        {latest && <span className="badge">{latest.phase}</span>}
-      </h2>
-      {latest && <p className="progress-current">{latest.message}</p>}
-      {percentage !== null && progressEvent && (
-        <div className="progress-meter" aria-label="Collection progress">
-          <div className="progress-meter-bar" style={{ width: `${percentage}%` }} />
-          <span>{progressEvent.current}/{progressEvent.total}</span>
+    <section className="card progress anim">
+      <div className="card-head">
+        <h2>
+          <span className="spinner" /> Working
+        </h2>
+        {latest && <span className="tag">{latest.phase}</span>}
+      </div>
+      <p className="muted">{latest?.message ?? "Starting…"}</p>
+      {pct !== null && withCount && (
+        <div className="bar" aria-label="progress">
+          <div className="bar-fill" style={{ width: `${pct}%` }} />
+          <span>{withCount.current}/{withCount.total}</span>
         </div>
       )}
-      <ol className="progress-list">
-        {events.slice(-10).map((event, index) => (
-          <li key={`${event.timestamp}-${index}`}>
-            <span className="progress-time">
-              {new Date(event.timestamp).toLocaleTimeString()}
-            </span>
-            <span className="progress-message">{event.message}</span>
-            {event.url && <span className="progress-url">{event.url}</span>}
-          </li>
-        ))}
-      </ol>
-    </div>
+    </section>
   );
 }

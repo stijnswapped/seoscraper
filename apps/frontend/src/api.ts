@@ -173,13 +173,108 @@ export function apiUrl(path: string): string {
   return `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
+// --- API key (persisted in this browser, sent as a Bearer token) ------------
+
+const API_KEY_STORAGE = "seoscrape_api_key";
+
+export function getApiKey(): string {
+  try {
+    return localStorage.getItem(API_KEY_STORAGE) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function setApiKey(value: string): void {
+  try {
+    const trimmed = value.trim();
+    if (trimmed) localStorage.setItem(API_KEY_STORAGE, trimmed);
+    else localStorage.removeItem(API_KEY_STORAGE);
+  } catch {
+    /* ignore storage failures (private mode etc.) */
+  }
+}
+
+function authHeaders(): Record<string, string> {
+  const key = getApiKey();
+  return key ? { Authorization: `Bearer ${key}` } : {};
+}
+
+// --- Listing rank tracker types ---------------------------------------------
+
+export type ListingRankDirection = "up" | "down" | "same" | "new" | "missing";
+
+export interface ListingRankItem {
+  rank: number;
+  productKey: string;
+  url: string;
+  handle?: string;
+  title?: string;
+  imageUrl?: string;
+  productId?: string;
+  source: string;
+}
+
+export interface ListingRankChange {
+  productKey: string;
+  url: string;
+  title?: string;
+  previousRank: number | null;
+  currentRank: number | null;
+  delta: number | null;
+  direction: ListingRankDirection;
+}
+
+export interface ListingRankSnapshot {
+  kind: "listing_rank_snapshot";
+  snapshotId: string;
+  trackedListingId: string;
+  storeDomain: string;
+  listingUrl: string;
+  sourceUsed: string;
+  checkedAt: string;
+  items: ListingRankItem[];
+  changes: ListingRankChange[];
+  summary: {
+    tracked: number;
+    new: number;
+    movedUp: number;
+    movedDown: number;
+    unchanged: number;
+    missing: number;
+  };
+  warnings: string[];
+}
+
+export type ListingResponse =
+  | { success: true; result: ListingRankSnapshot }
+  | { success: false; error: ApiError };
+
+// --- Calls ------------------------------------------------------------------
+
 export async function checkProduct(url: string, runId?: string): Promise<CheckResponse> {
   const res = await fetch(apiUrl("/api/check-product"), {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...authHeaders() },
     body: JSON.stringify({ url, runId }),
   });
   return (await res.json()) as CheckResponse;
+}
+
+export async function trackListing(
+  url: string,
+  opts?: { sourceStrategy?: string; maxProducts?: number },
+): Promise<ListingResponse> {
+  const res = await fetch(apiUrl("/api/listings/track"), {
+    method: "POST",
+    headers: { "content-type": "application/json", ...authHeaders() },
+    body: JSON.stringify({
+      url,
+      sourceStrategy: opts?.sourceStrategy ?? "auto",
+      maxProducts: opts?.maxProducts ?? 100,
+    }),
+  });
+  return (await res.json()) as ListingResponse;
 }
 
 export function createProgressSource(runId: string): EventSource {
