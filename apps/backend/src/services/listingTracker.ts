@@ -1,4 +1,4 @@
-import { load, type CheerioAPI } from "cheerio";
+import type { CheerioAPI } from "cheerio";
 import type { Element } from "domhandler";
 import { sitesConfig } from "../../../../config/sites.config.js";
 import type {
@@ -10,7 +10,9 @@ import type {
 } from "../types/productCheck.js";
 import { CheckError } from "../types/productCheck.js";
 import { assertDomainAllowed, validateAndNormalizeUrl } from "../utils/url.js";
-import { loadRenderedPage } from "./pageLoader.js";
+import { withBrowserSession } from "./pageLoader.js";
+import { crawlPages, resolveMaxPages } from "./pagination.js";
+import type { ProgressReporter } from "./progressHub.js";
 import {
   createSnapshot,
   getLatestSnapshot,
@@ -22,6 +24,8 @@ interface TrackListingInput {
   url: string;
   sourceStrategy: ListingSourceStrategy;
   maxProducts: number;
+  maxPages?: number;
+  progress?: ProgressReporter;
 }
 
 interface ExtractionResult {
@@ -46,11 +50,13 @@ const LISTING_SOURCE_STRATEGIES = new Set<ListingSourceStrategy>(["auto", "html"
 export async function trackListing(input: TrackListingInput): Promise<ListingRankSnapshot> {
   const strategy = normalizeSourceStrategy(input.sourceStrategy);
   const maxProducts = normalizeMaxProducts(input.maxProducts);
+  const maxPages = resolveMaxPages(input.maxPages);
+  const progress = input.progress;
   const { url, hostname } = validateAndNormalizeUrl(input.url);
   assertDomainAllowed(hostname);
 
   const listingKey = createListingKey(url);
-  const extraction = await extractListingItems(url, strategy, maxProducts);
+  const extraction = await extractListingItems(url, strategy, maxProducts, maxPages, progress);
   if (extraction.items.length === 0) {
     throw new CheckError("NO_PRODUCT_DATA_FOUND", "No product ranking items were found for this listing.");
   }
@@ -103,10 +109,12 @@ async function extractListingItems(
   url: URL,
   strategy: ListingSourceStrategy,
   maxProducts: number,
+  maxPages: number,
+  progress?: ProgressReporter,
 ): Promise<ExtractionResult> {
   const warnings: string[] = [];
-  const htmlItems = strategy === "shopify_json" ? [] : await extractHtmlListingItems(url, maxProducts, warnings);
-  const shopifyItems = strategy === "html" ? [] : await extractShopifyListingItems(url, maxProducts, warnings);
+  const htmlItems = strategy === "shopify_json" ? [] : await extractHtmlListingItems(url, maxProducts, maxPages, progress, warnings);
+  const shopifyItems = strategy === "html" ? [] : await extractShopifyListingItems(url, maxProducts, maxPages, progress, warnings);
 
   if (strategy === "html") {
     return { sourceUsed: "html", items: htmlItems, warnings, rawMetadata: { htmlCount: htmlItems.length } };
@@ -146,31 +154,49 @@ async function extractListingItems(
   };
 }
 
-async function extractHtmlListingItems(url: URL, maxProducts: number, warnings: string[]): Promise<ListingRankItem[]> {
+async function extractHtmlListingItems(
+  url: URL,
+  maxProducts: number,
+  maxPages: number,
+  progress: ProgressReporter | undefined,
+  warnings: string[],
+): Promise<ListingRankItem[]> {
   try {
-    const page = await loadRenderedPage(url.toString());
-    const $ = load(page.html);
     const byKey = new Map<string, ListingRankItem>();
 
-    $("a[href]").each((_, el) => {
-      if (byKey.size >= maxProducts) return;
-      const href = $(el).attr("href");
-      if (!href) return;
-      const productUrl = normalizeProductUrl(href, page.finalUrl);
-      if (!productUrl) return;
-      const product = productIdentity(productUrl);
-      const title = cleanText($(el).text()) ?? cleanText($(el).attr("aria-label"));
-      const imageUrl = findNearestImageUrl($, el, page.finalUrl);
-      const item: ListingRankItem = {
-        rank: byKey.size + 1,
-        productKey: product.productKey,
-        url: productUrl,
-        ...(product.handle ? { handle: product.handle } : {}),
-        ...(title ? { title } : {}),
-        ...(imageUrl ? { imageUrl } : {}),
-        source: "html",
-      };
-      if (!byKey.has(item.productKey)) byKey.set(item.productKey, item);
+    await withBrowserSession(async (session) => {
+      await crawlPages(
+        session,
+        url.toString(),
+        {
+          maxPages,
+          progress,
+          label: "Scanning best-sellers",
+          shouldStop: () => byKey.size >= maxProducts,
+        },
+        ({ $, finalUrl }) => {
+          $("a[href]").each((_, el) => {
+            if (byKey.size >= maxProducts) return;
+            const href = $(el).attr("href");
+            if (!href) return;
+            const productUrl = normalizeProductUrl(href, finalUrl);
+            if (!productUrl) return;
+            const product = productIdentity(productUrl);
+            if (byKey.has(product.productKey)) return;
+            const title = cleanText($(el).text()) ?? cleanText($(el).attr("aria-label"));
+            const imageUrl = findNearestImageUrl($, el, finalUrl);
+            byKey.set(product.productKey, {
+              rank: byKey.size + 1,
+              productKey: product.productKey,
+              url: productUrl,
+              ...(product.handle ? { handle: product.handle } : {}),
+              ...(title ? { title } : {}),
+              ...(imageUrl ? { imageUrl } : {}),
+              source: "html",
+            });
+          });
+        },
+      );
     });
 
     return [...byKey.values()].map((item, index) => ({ ...item, rank: index + 1 }));
@@ -180,32 +206,48 @@ async function extractHtmlListingItems(url: URL, maxProducts: number, warnings: 
   }
 }
 
-async function extractShopifyListingItems(url: URL, maxProducts: number, warnings: string[]): Promise<ListingRankItem[]> {
-  const endpoint = getShopifyCollectionProductsUrl(url, maxProducts);
-  if (!endpoint) return [];
+async function extractShopifyListingItems(
+  url: URL,
+  maxProducts: number,
+  maxPages: number,
+  progress: ProgressReporter | undefined,
+  warnings: string[],
+): Promise<ListingRankItem[]> {
+  const collectionPath = getShopifyCollectionPath(url);
+  if (!collectionPath) return [];
 
-  try {
-    const response = await fetch(endpoint, {
-      headers: {
-        accept: "application/json,text/plain,*/*;q=0.8",
-        "accept-language": "en-US,en;q=0.9",
-        "user-agent": sitesConfig.browser.userAgent,
-      },
-      redirect: "follow",
-    });
-    if (!response.ok) {
-      warnings.push(`Shopify products JSON returned HTTP ${response.status}.`);
-      return [];
-    }
-    if (!sameOrigin(endpoint, response.url || endpoint)) {
-      warnings.push("Shopify products JSON redirected to another origin and was ignored.");
-      return [];
-    }
-    const data = (await response.json()) as unknown;
-    const products = data && typeof data === "object" ? (data as Record<string, unknown>)["products"] : null;
-    if (!Array.isArray(products)) return [];
+  const items: ListingRankItem[] = [];
+  const seen = new Set<string>();
 
-    const items: ListingRankItem[] = [];
+  for (let page = 1; page <= maxPages && items.length < maxProducts; page++) {
+    const endpoint = `${url.origin}${collectionPath}/products.json?limit=250&page=${page}`;
+    let products: unknown;
+    try {
+      const response = await fetch(endpoint, {
+        headers: {
+          accept: "application/json,text/plain,*/*;q=0.8",
+          "accept-language": "en-US,en;q=0.9",
+          "user-agent": sitesConfig.browser.userAgent,
+        },
+        redirect: "follow",
+      });
+      if (!response.ok) {
+        if (page === 1) warnings.push(`Shopify products JSON returned HTTP ${response.status}.`);
+        break;
+      }
+      if (!sameOrigin(endpoint, response.url || endpoint)) {
+        warnings.push("Shopify products JSON redirected to another origin and was ignored.");
+        break;
+      }
+      const data = (await response.json()) as unknown;
+      products = data && typeof data === "object" ? (data as Record<string, unknown>)["products"] : null;
+    } catch (err) {
+      warnings.push(`Shopify listing extraction failed: ${(err as Error).message}`);
+      break;
+    }
+
+    if (!Array.isArray(products) || products.length === 0) break;
+
     for (const product of products) {
       if (items.length >= maxProducts || !product || typeof product !== "object") break;
       const obj = product as ShopifyProductJson;
@@ -214,6 +256,8 @@ async function extractShopifyListingItems(url: URL, maxProducts: number, warning
       const productUrl = new URL(`/products/${handle}`, url.origin).toString();
       const productId = asString(obj.id);
       const productKey = productId ? `shopify:${productId}` : `handle:${handle.toLowerCase()}`;
+      if (seen.has(productKey)) continue;
+      seen.add(productKey);
       const title = asString(obj.title);
       const imageUrl = firstShopifyImage(obj);
       items.push({
@@ -227,11 +271,18 @@ async function extractShopifyListingItems(url: URL, maxProducts: number, warning
         source: "shopify_json",
       });
     }
-    return items;
-  } catch (err) {
-    warnings.push(`Shopify listing extraction failed: ${(err as Error).message}`);
-    return [];
+
+    progress?.({
+      phase: "scanning-pages",
+      message: `Best-sellers (Shopify) — page ${page} · ${items.length} products`,
+      current: page,
+      total: maxPages,
+    });
+
+    if (products.length < 250) break;
   }
+
+  return items.map((item, index) => ({ ...item, rank: index + 1 }));
 }
 
 function mergeListingItems(htmlItems: ListingRankItem[], shopifyItems: ListingRankItem[], maxProducts: number): ListingRankItem[] {
@@ -324,11 +375,10 @@ function createListingKey(url: URL): string {
   return `${normalized.hostname.toLowerCase()}|${path}${sortBy ? `|sort_by=${sortBy}` : ""}`;
 }
 
-function getShopifyCollectionProductsUrl(url: URL, maxProducts: number): string | null {
+function getShopifyCollectionPath(url: URL): string | null {
   const match = url.pathname.match(/^(.*?\/collections\/[^/?#]+)/i);
   const collectionPath = match?.[1]?.replace(/\/+$/, "");
-  if (!collectionPath) return null;
-  return `${url.origin}${collectionPath}/products.json?limit=${Math.min(maxProducts, 250)}`;
+  return collectionPath ?? null;
 }
 
 function normalizeProductUrl(rawHref: string, baseUrl: string): string | null {

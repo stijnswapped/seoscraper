@@ -16,12 +16,15 @@ import {
   assertDomainAllowed,
   validateAndNormalizeUrl,
 } from "../utils/url.js";
-import { loadRenderedPage } from "../services/pageLoader.js";
+import type { CheerioAPI } from "cheerio";
+import { loadRenderedPage, withBrowserSession } from "../services/pageLoader.js";
 import type { LoadedPage } from "../services/pageLoader.js";
 import { extractMetadata } from "../services/metadataExtractor.js";
 import { extractProduct } from "../services/productExtractor.js";
 import { discoverImages } from "../services/imageDiscovery.js";
 import { downloadAndSelect } from "../services/imageDownloader.js";
+import { crawlPages, resolveMaxPages } from "../services/pagination.js";
+import { extractProductUrlsFromPage } from "../services/collectionDiscovery.js";
 import {
   createRun,
   writeData,
@@ -42,6 +45,7 @@ const log = createLogger("checkProduct");
 const bodySchema = z.object({
   url: z.string().min(1, "url is required"),
   runId: z.string().min(1).optional(),
+  maxPages: z.number().int().positive().optional(),
 });
 
 interface ApiResult {
@@ -49,28 +53,65 @@ interface ApiResult {
   fileBaseUrl?: string;
 }
 
-export async function runCheck(inputUrl: string, progress: ProgressReporter = () => {}): Promise<ApiResult> {
+export async function runCheck(
+  inputUrl: string,
+  progress: ProgressReporter = () => {},
+  maxPagesRequested?: number,
+): Promise<ApiResult> {
   const { url, hostname } = validateAndNormalizeUrl(inputUrl);
   assertDomainAllowed(hostname);
 
+  const maxPages = resolveMaxPages(maxPagesRequested);
+  const maxProducts = sitesConfig.collections.maxProducts;
+
   progress({ phase: "loading", message: "Rendering input URL.", url: url.toString() });
-  const page = await loadRenderedPage(url.toString());
-  progress({ phase: "loaded", message: "Input URL loaded and settled.", url: page.finalUrl });
-  const meta = extractMetadata(page.html, page.finalUrl);
-  const collection = discoverCollectionProducts(
-    meta,
-    page.finalUrl,
-    sitesConfig.collections.maxProducts,
-  );
 
-  if (collection.isCollection) {
-    return runCollectionCheck(inputUrl, hostname, page, collection.productUrls, progress);
+  // One browser session covers page 1 + (for collections) the pagination crawl.
+  const discovery = await withBrowserSession(async (session) => {
+    const page = await session.loadPage(url.toString());
+    progress({ phase: "loaded", message: "Input URL loaded and settled.", url: page.finalUrl });
+
+    const meta = extractMetadata(page.html, page.finalUrl);
+    const collection = discoverCollectionProducts(meta, page.finalUrl, maxProducts);
+    if (!collection.isCollection) {
+      return { isCollection: false as const, page, meta };
+    }
+
+    const urls = new Map<string, string>();
+    const addFrom = ($: CheerioAPI, finalUrl: string) => {
+      for (const productUrl of extractProductUrlsFromPage($, finalUrl)) {
+        if (urls.size >= maxProducts) break;
+        if (!urls.has(productUrl)) urls.set(productUrl, productUrl);
+      }
+    };
+
+    await crawlPages(
+      session,
+      page.finalUrl,
+      {
+        maxPages,
+        progress,
+        label: "Scanning collection",
+        firstPage: page,
+        shouldStop: () => urls.size >= maxProducts,
+      },
+      ({ $, finalUrl }) => addFrom($, finalUrl),
+    );
+
+    return {
+      isCollection: true as const,
+      page,
+      productUrls: [...urls.values()].slice(0, maxProducts),
+    };
+  });
+
+  if (discovery.isCollection) {
+    return runCollectionCheck(inputUrl, hostname, discovery.page, discovery.productUrls, progress);
   }
-
-  return processProductPage(inputUrl, hostname, page, meta, progress);
+  return processProductPage(inputUrl, hostname, discovery.page, discovery.meta, progress);
 }
 
-async function runSingleProductCheck(inputUrl: string, progress: ProgressReporter = () => {}): Promise<{
+export async function runSingleProductCheck(inputUrl: string, progress: ProgressReporter = () => {}): Promise<{
   result: ProductCheckResult;
   fileBaseUrl: string;
 }> {
@@ -333,7 +374,7 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
     const progress = createProgressReporter(parsed.data.runId);
     try {
       progress({ phase: "queued", message: "Check request accepted.", url: parsed.data.url });
-      const { result, fileBaseUrl } = await runCheck(parsed.data.url, progress);
+      const { result, fileBaseUrl } = await runCheck(parsed.data.url, progress, parsed.data.maxPages);
       return reply.send({ success: true, result, fileBaseUrl });
     } catch (err) {
       if (err instanceof CheckError) {

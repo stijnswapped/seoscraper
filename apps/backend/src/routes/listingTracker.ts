@@ -1,6 +1,8 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { trackListing, normalizeSourceStrategy } from "../services/listingTracker.js";
+import { startListingEnrichment } from "../services/listingEnrichment.js";
+import { createProgressReporter, finishProgress } from "../services/progressHub.js";
 import { requireApiKeyAuth } from "../services/apiAuth.js";
 import { CheckError } from "../types/productCheck.js";
 import type { ErrorCode } from "../types/productCheck.js";
@@ -15,6 +17,9 @@ const trackListingBodySchema = z.object({
   url: z.string().min(1, "url is required"),
   sourceStrategy: z.enum(["auto", "html", "shopify_json", "both"]).optional(),
   maxProducts: z.number().int().positive().max(250).optional(),
+  maxPages: z.number().int().positive().optional(),
+  runId: z.string().min(1).optional(),
+  enrich: z.boolean().optional(),
 });
 
 const listingParamsSchema = z.object({
@@ -34,14 +39,33 @@ export function registerListingTrackerRoutes(app: FastifyInstance): void {
       });
     }
 
+    const progress = createProgressReporter(parsed.data.runId);
     try {
+      progress({ phase: "queued", message: "Listing track accepted.", url: parsed.data.url });
       const result = await trackListing({
         url: parsed.data.url,
         sourceStrategy: normalizeSourceStrategy(parsed.data.sourceStrategy),
         maxProducts: parsed.data.maxProducts ?? 100,
+        maxPages: parsed.data.maxPages,
+        progress,
       });
-      return reply.send({ success: true, result });
+
+      if (parsed.data.enrich) {
+        // Fire-and-forget background scrape; it streams progress and closes the
+        // SSE stream when finished. The ranking is returned immediately below.
+        progress({
+          phase: "snapshot-ready",
+          message: `Ranking captured (${result.items.length} products). Starting background enrichment.`,
+          total: result.items.length,
+        });
+        startListingEnrichment(result, parsed.data.runId);
+      } else {
+        finishProgress(parsed.data.runId);
+      }
+
+      return reply.send({ success: true, result, enriching: Boolean(parsed.data.enrich) });
     } catch (err) {
+      finishProgress(parsed.data.runId);
       if (err instanceof CheckError) {
         const status = err.code === "DOMAIN_NOT_ALLOWED" || err.code === "INVALID_URL" ? 400 : 502;
         return reply.status(status).send({ success: false, error: { code: err.code, message: err.message } });

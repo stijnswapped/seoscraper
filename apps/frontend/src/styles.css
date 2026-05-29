@@ -147,6 +147,13 @@ input:focus {
   box-shadow: var(--shadow);
 }
 
+.options { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.field.inline { flex-direction: row; align-items: center; gap: 8px; }
+.field.inline > span { margin: 0; white-space: nowrap; }
+.field.inline input { width: 110px; }
+.check { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; color: var(--muted); cursor: pointer; }
+.check input { width: auto; }
+
 .url-row { display: flex; gap: 10px; }
 .url-row input { flex: 1; }
 

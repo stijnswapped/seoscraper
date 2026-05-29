@@ -252,18 +252,25 @@ export type ListingResponse =
 
 // --- Calls ------------------------------------------------------------------
 
-export async function checkProduct(url: string, runId?: string): Promise<CheckResponse> {
+export async function checkProduct(
+  url: string,
+  opts?: { runId?: string; maxPages?: number },
+): Promise<CheckResponse> {
   const res = await fetch(apiUrl("/api/check-product"), {
     method: "POST",
     headers: { "content-type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ url, runId }),
+    body: JSON.stringify({
+      url,
+      ...(opts?.runId ? { runId: opts.runId } : {}),
+      ...(opts?.maxPages ? { maxPages: opts.maxPages } : {}),
+    }),
   });
   return (await res.json()) as CheckResponse;
 }
 
 export async function trackListing(
   url: string,
-  opts?: { sourceStrategy?: string; maxProducts?: number },
+  opts?: { runId?: string; enrich?: boolean; maxPages?: number; sourceStrategy?: string; maxProducts?: number },
 ): Promise<ListingResponse> {
   const res = await fetch(apiUrl("/api/listings/track"), {
     method: "POST",
@@ -272,6 +279,9 @@ export async function trackListing(
       url,
       sourceStrategy: opts?.sourceStrategy ?? "auto",
       maxProducts: opts?.maxProducts ?? 100,
+      ...(opts?.runId ? { runId: opts.runId } : {}),
+      ...(opts?.enrich ? { enrich: true } : {}),
+      ...(opts?.maxPages ? { maxPages: opts.maxPages } : {}),
     }),
   });
   return (await res.json()) as ListingResponse;

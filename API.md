@@ -71,7 +71,12 @@ Scrape one shop URL.
 ```json
 { "url": "https://shop.com/products/blue-dress" }
 ```
-(Optional: `"runId": "<any-unique-string>"` if you also want live progress — see §6.)
+Optional fields:
+- `"runId": "<any-unique-string>"` — to receive live progress (see §6).
+- `"maxPages": <number>` — for a **collection/category** URL, how many listing pages
+  to walk (follows pagination + auto-scroll). Defaults to the server's
+  `MAX_COLLECTION_PAGES` (10), capped at the server ceiling. Ignored for a single
+  product page. Crawling also stops once `MAX_COLLECTION_PRODUCTS` is reached.
 
 **Example:**
 ```bash
@@ -234,11 +239,23 @@ ranks moved since the last time you checked the same listing.
 
 **Send:**
 ```json
-{ "url": "https://shop.com/collections/all?sort_by=best-selling", "sourceStrategy": "auto", "maxProducts": 100 }
+{ "url": "https://shop.com/collections/all?sort_by=best-selling", "sourceStrategy": "auto", "maxProducts": 100, "maxPages": 10, "runId": "abc", "enrich": false }
 ```
 - `url` (required).
 - `sourceStrategy` (optional): `"auto"` (default), `"html"`, `"shopify_json"`, or `"both"`.
 - `maxProducts` (optional): 1–250, default 100.
+- `maxPages` (optional): how many listing pages to walk (pagination). Default
+  `MAX_COLLECTION_PAGES` (10), capped at the server ceiling.
+- `runId` (optional): receive live progress on `/api/check-progress/{runId}` (§6).
+- `enrich` (optional, default false): if true, after the ranking is returned the
+  server runs a **background** full SEO + image scrape of every product
+  (concurrency-limited). It never blocks this response — watch its progress on
+  the same `runId` (phases: `enrich-start`, `enrich-product-done`,
+  `enrich-product-failed`, `enrich-complete`). Each finished product's
+  `fileBaseUrl` arrives in the progress event's `url` field.
+
+The `track` response also includes `"enriching": true|false` so you know whether
+background enrichment was started.
 
 **Get back:**
 ```jsonc

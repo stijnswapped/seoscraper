@@ -24,6 +24,11 @@ export function discoverCollectionProducts(
   return { isCollection, productUrls };
 }
 
+/** Extract all normalized product URLs from one rendered page (no cap). */
+export function extractProductUrlsFromPage($: CheerioAPI, finalUrl: string): string[] {
+  return extractProductUrls($, finalUrl, Number.POSITIVE_INFINITY);
+}
+
 function isLikelyCollection(
   meta: ExtractedMetadata,
   finalUrl: string,

@@ -54,6 +54,8 @@ export interface SitesConfig {
     waitUntil: WaitUntil;
     /** Max time spent auto-scrolling to trigger lazy images. */
     scrollTimeoutMs: number;
+    /** Stop scrolling after this many consecutive rounds with no height change. */
+    scrollSettleRounds: number;
     userAgent: string;
     extraHTTPHeaders: Record<string, string>;
     viewport: { width: number; height: number };
@@ -88,6 +90,16 @@ export interface SitesConfig {
 
   collections: {
     maxProducts: number;
+    /** Default max pages to crawl when walking pagination (overridable per request). */
+    maxPages: number;
+    /** Hard ceiling for a per-request maxPages override. */
+    maxPagesCeiling: number;
+  };
+
+  /** Async per-product enrichment for the best-seller tracker. */
+  enrichment: {
+    /** How many product pages to scrape in parallel. */
+    concurrency: number;
   };
 }
 
@@ -135,7 +147,8 @@ export const sitesConfig: SitesConfig = {
   browser: {
     timeoutMs: 30000,
     waitUntil: "domcontentloaded",
-    scrollTimeoutMs: 8000,
+    scrollTimeoutMs: 15000,
+    scrollSettleRounds: 3,
     userAgent:
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -176,5 +189,11 @@ export const sitesConfig: SitesConfig = {
 
   collections: {
     maxProducts: envInt("MAX_COLLECTION_PRODUCTS", 100),
+    maxPages: envInt("MAX_COLLECTION_PAGES", 10),
+    maxPagesCeiling: envInt("MAX_COLLECTION_PAGES_CEILING", 100),
+  },
+
+  enrichment: {
+    concurrency: envInt("ENRICH_CONCURRENCY", 3),
   },
 };
