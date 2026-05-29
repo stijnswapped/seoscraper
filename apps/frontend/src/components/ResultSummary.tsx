@@ -1,4 +1,5 @@
 import type { ExtractedField, ProductCheckResult } from "../api.js";
+import { apiUrl } from "../api.js";
 import { ImageGallery } from "./ImageGallery.js";
 
 function isUrl(v: string | null): v is string {
@@ -43,9 +44,10 @@ function Pills({ data }: { data: Record<string, string> }) {
 interface Props {
   result: ProductCheckResult;
   fileBaseUrl: string;
+  dataUrl?: string | null;
 }
 
-export function ResultSummary({ result, fileBaseUrl }: Props) {
+export function ResultSummary({ result, fileBaseUrl, dataUrl }: Props) {
   const { seo, product, images, finalUrl, domain, checkedAt } = result;
   const selective = images.strategy.mode === "selective";
 
@@ -60,6 +62,11 @@ export function ResultSummary({ result, fileBaseUrl }: Props) {
           <a href={finalUrl} target="_blank" rel="noreferrer">{finalUrl}</a>
           {" · "}{new Date(checkedAt).toLocaleString()}
         </p>
+        {dataUrl && (
+          <p className="muted">
+            Saved data: <a href={apiUrl(dataUrl)} target="_blank" rel="noreferrer">{apiUrl(dataUrl)}</a>
+          </p>
+        )}
         <div className="stats">
           <div className="stat"><b>{images.discovered.length}</b><span>found</span></div>
           <div className="stat ok"><b>{images.downloaded.length}</b><span>kept</span></div>

@@ -152,7 +152,7 @@ export interface ApiError {
 }
 
 export type CheckResponse =
-  | { success: true; result: CheckResult; fileBaseUrl?: string | null }
+  | { success: true; result: CheckResult; fileBaseUrl?: string | null; dataUrl?: string | null }
   | { success: false; error: ApiError };
 
 /**
@@ -254,7 +254,7 @@ export type ListingResponse =
 
 export async function checkProduct(
   url: string,
-  opts?: { runId?: string; maxPages?: number },
+  opts?: { runId?: string; maxPages?: number; responseMode?: "full" | "url" },
 ): Promise<CheckResponse> {
   const res = await fetch(apiUrl("/api/check-product"), {
     method: "POST",
@@ -263,6 +263,7 @@ export async function checkProduct(
       url,
       ...(opts?.runId ? { runId: opts.runId } : {}),
       ...(opts?.maxPages ? { maxPages: opts.maxPages } : {}),
+      ...(opts?.responseMode ? { responseMode: opts.responseMode } : {}),
     }),
   });
   return (await res.json()) as CheckResponse;

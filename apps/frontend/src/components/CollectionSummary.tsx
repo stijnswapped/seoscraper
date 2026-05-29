@@ -1,7 +1,14 @@
 import type { CollectionCheckResult } from "../api.js";
+import { apiUrl } from "../api.js";
 import { ResultSummary } from "./ResultSummary.js";
 
-export function CollectionSummary({ result }: { result: CollectionCheckResult }) {
+export function CollectionSummary({
+  result,
+  dataUrl,
+}: {
+  result: CollectionCheckResult;
+  dataUrl?: string | null;
+}) {
   return (
     <div className="anim">
       <section className="card">
@@ -12,6 +19,11 @@ export function CollectionSummary({ result }: { result: CollectionCheckResult })
         <p className="muted">
           <a href={result.finalUrl} target="_blank" rel="noreferrer">{result.finalUrl}</a>
         </p>
+        {dataUrl && (
+          <p className="muted">
+            Saved data: <a href={apiUrl(dataUrl)} target="_blank" rel="noreferrer">{apiUrl(dataUrl)}</a>
+          </p>
+        )}
         <div className="stats">
           <div className="stat"><b>{result.summary.discovered}</b><span>found</span></div>
           <div className="stat ok"><b>{result.summary.succeeded}</b><span>scraped</span></div>
@@ -42,7 +54,11 @@ export function CollectionSummary({ result }: { result: CollectionCheckResult })
             <a href={product.url} target="_blank" rel="noreferrer" className="muted">{product.url}</a>
           </div>
           {product.success ? (
-            <ResultSummary result={product.result} fileBaseUrl={product.fileBaseUrl ?? ""} />
+            <ResultSummary
+              result={product.result}
+              fileBaseUrl={product.fileBaseUrl ?? ""}
+              dataUrl={product.fileBaseUrl ? `${product.fileBaseUrl}/data.json` : null}
+            />
           ) : (
             <div className="error">
               <strong>{product.error.code}</strong>

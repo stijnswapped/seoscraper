@@ -4,6 +4,7 @@ import { createLogger } from "../utils/logger.js";
 import { runWithConcurrency } from "../utils/concurrency.js";
 import { createProgressReporter, finishProgress } from "./progressHub.js";
 import { runSingleProductCheck } from "../routes/checkProduct.js";
+import { withBrowserSession } from "./pageLoader.js";
 
 const log = createLogger("listingEnrichment");
 
@@ -33,28 +34,30 @@ async function runEnrichment(snapshot: ListingRankSnapshot, runId?: string): Pro
   });
 
   try {
-    await runWithConcurrency(items, concurrency, async (item) => {
-      try {
-        const { fileBaseUrl } = await runSingleProductCheck(item.url);
-        done += 1;
-        progress({
-          phase: "enrich-product-done",
-          message: `Scraped ${item.title ?? item.url}`,
-          url: fileBaseUrl,
-          current: done + failed,
-          total: items.length,
-        });
-      } catch (err) {
-        failed += 1;
-        progress({
-          phase: "enrich-product-failed",
-          message: `Failed ${item.title ?? item.url}: ${(err as Error).message}`,
-          url: item.url,
-          current: done + failed,
-          total: items.length,
-        });
-      }
-    });
+    await withBrowserSession(async (session) =>
+      runWithConcurrency(items, concurrency, async (item) => {
+        try {
+          const { fileBaseUrl } = await runSingleProductCheck(item.url, progress, session);
+          done += 1;
+          progress({
+            phase: "enrich-product-done",
+            message: `Scraped ${item.title ?? item.url}`,
+            url: fileBaseUrl,
+            current: done + failed,
+            total: items.length,
+          });
+        } catch (err) {
+          failed += 1;
+          progress({
+            phase: "enrich-product-failed",
+            message: `Failed ${item.title ?? item.url}: ${(err as Error).message}`,
+            url: item.url,
+            current: done + failed,
+            total: items.length,
+          });
+        }
+      }),
+    );
 
     progress({
       phase: "enrich-complete",

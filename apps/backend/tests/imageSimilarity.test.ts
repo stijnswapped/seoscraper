@@ -22,6 +22,7 @@ const mockImageConfig: SitesConfig["images"] = {
   maxAspectRatio: 3.0,
   edgeSimilarityThreshold: 0.9,
   maxProcessingFailureRatio: 0.5,
+  downloadConcurrency: 4,
 };
 
 let dummyId = 0;

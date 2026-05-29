@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
+  CheckResult,
   ProductCheckResult,
   RawMetadata,
   SeoSnapshot,
@@ -63,7 +64,7 @@ export async function writeRaw(
 /** Write the final data.json. */
 export async function writeData(
   paths: RunPaths,
-  result: ProductCheckResult,
+  result: CheckResult,
 ): Promise<string> {
   try {
     const dataJsonPath = path.join(paths.runDir, "data.json");

@@ -29,11 +29,11 @@ The API key is required. Without it you get `401`. (`x-api-key: <API_KEY>` also 
 **Always check `success` in the JSON first.** Every response is one of:
 
 ```json
-{ "success": true,  "result": { ... }, "fileBaseUrl": "/files/runs/..." }
+{ "success": true,  "result": { ... }, "fileBaseUrl": "/files/runs/...", "dataUrl": "/files/runs/.../data.json" }
 { "success": false, "error":  { "code": "SOME_CODE", "message": "why it failed" } }
 ```
 - If `success` is `false`, read `error.code` and stop — do not read `result`.
-- `fileBaseUrl` only appears for single-product results.
+- `fileBaseUrl` and `dataUrl` appear on successful scrape responses.
 
 ---
 
@@ -77,6 +77,9 @@ Optional fields:
   to walk (follows pagination + auto-scroll). Defaults to the server's
   `MAX_COLLECTION_PAGES` (10), capped at the server ceiling. Ignored for a single
   product page. Crawling also stops once `MAX_COLLECTION_PRODUCTS` is reached.
+- `"responseMode": "full" | "url"` — `"full"` returns the full JSON payload;
+  `"url"` returns only the file URLs and a small summary, so callers can fetch
+  the saved `data.json` instead of receiving a large response body.
 
 **Example:**
 ```bash
@@ -94,6 +97,7 @@ curl -X POST https://seoscrapebackend-production.up.railway.app/api/check-produc
 {
   "success": true,
   "fileBaseUrl": "/files/runs/20260529t163141z-shop-com-60be737d",
+  "dataUrl": "/files/runs/20260529t163141z-shop-com-60be737d/data.json",
   "result": {
     "kind": "product",
     "finalUrl": "https://shop.com/products/blue-dress",  // after redirects
@@ -161,6 +165,8 @@ The page was a list of products, so each product was scraped too.
 ```jsonc
 {
   "success": true,
+  "fileBaseUrl": "/files/runs/20260529t163141z-shop-com-60be737d",
+  "dataUrl": "/files/runs/20260529t163141z-shop-com-60be737d/data.json",
   "result": {
     "kind": "collection",
     "finalUrl": "https://shop.com/collections/dresses",
@@ -261,6 +267,8 @@ background enrichment was started.
 ```jsonc
 {
   "success": true,
+  "fileBaseUrl": "/files/runs/20260529t163141z-shop-com-60be737d",
+  "dataUrl": "/files/runs/20260529t163141z-shop-com-60be737d/data.json",
   "result": {
     "kind": "listing_rank_snapshot",
     "trackedListingId": "uuid",     // SAVE THIS to read history later

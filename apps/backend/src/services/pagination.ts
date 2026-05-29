@@ -18,6 +18,8 @@ export interface CrawlOptions {
   progress?: ProgressReporter;
   /** Label used in progress messages, e.g. "Scanning collection". */
   label?: string;
+  /** Which scroll budget to use when rendering pages. */
+  scrollProfile?: "product" | "listing";
   /** Return true to stop crawling early (e.g. enough items collected). */
   shouldStop?: () => boolean;
   /** Optional already-rendered first page, to avoid re-rendering it. */
@@ -46,7 +48,9 @@ export async function crawlPages(
     pageNumber += 1;
 
     const page: LoadedPage =
-      pageNumber === 1 && options.firstPage ? options.firstPage : await session.loadPage(url);
+      pageNumber === 1 && options.firstPage
+        ? options.firstPage
+        : await session.loadPage(url, { scrollProfile: options.scrollProfile ?? "listing" });
     const $ = load(page.html);
     onPage({ $, finalUrl: page.finalUrl, pageNumber });
 

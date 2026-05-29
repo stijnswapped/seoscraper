@@ -52,8 +52,10 @@ export interface SitesConfig {
   browser: {
     timeoutMs: number;
     waitUntil: WaitUntil;
-    /** Max time spent auto-scrolling to trigger lazy images. */
+    /** Max auto-scroll time for listing/collection pages (lazy grids). */
     scrollTimeoutMs: number;
+    /** Max auto-scroll time for single product pages (settles fast). */
+    productScrollTimeoutMs: number;
     /** Stop scrolling after this many consecutive rounds with no height change. */
     scrollSettleRounds: number;
     userAgent: string;
@@ -79,10 +81,17 @@ export interface SitesConfig {
     edgeSimilarityThreshold: number;
     /** If more than this fraction of candidates fail processing, fall back. */
     maxProcessingFailureRatio: number;
+    /** How many images to download + process in parallel per product. */
+    downloadConcurrency: number;
   };
 
   output: {
     baseDir: string;
+  };
+
+  /** Parallelism for multi-product scraping (collections). */
+  scraping: {
+    concurrency: number;
   };
 
   /** Domain-specific extraction hints. Empty by default (generic mode). */
@@ -147,7 +156,8 @@ export const sitesConfig: SitesConfig = {
   browser: {
     timeoutMs: 30000,
     waitUntil: "domcontentloaded",
-    scrollTimeoutMs: 15000,
+    scrollTimeoutMs: envInt("LISTING_SCROLL_TIMEOUT_MS", 15000),
+    productScrollTimeoutMs: envInt("PRODUCT_SCROLL_TIMEOUT_MS", 5000),
     scrollSettleRounds: 3,
     userAgent:
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
@@ -177,11 +187,19 @@ export const sitesConfig: SitesConfig = {
     maxAspectRatio: 3.0,
     edgeSimilarityThreshold: 0.9,
     maxProcessingFailureRatio: 0.5,
+    downloadConcurrency: envInt("IMAGE_CONCURRENCY", 6),
   },
 
   // --- Output ---------------------------------------------------------------
   output: {
     baseDir: process.env.OUTPUT_DIR ?? "output",
+  },
+
+  // --- Multi-product scraping parallelism -----------------------------------
+  // Match this to the Railway box: ~1 concurrent page per vCPU,
+  // ~250-350MB RAM per page. Mid box (2 vCPU / 2-4GB) -> 4.
+  scraping: {
+    concurrency: envInt("SCRAPE_CONCURRENCY", 4),
   },
 
   // --- Future per-site overrides (generic mode = empty) ---------------------

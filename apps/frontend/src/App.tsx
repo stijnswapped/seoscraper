@@ -22,7 +22,7 @@ type State =
   | { status: "idle" }
   | { status: "loading"; progress: ProgressEvent[] }
   | { status: "error"; error: ApiError }
-  | { status: "scrape"; result: CheckResult; fileBaseUrl?: string | null }
+  | { status: "scrape"; result: CheckResult; fileBaseUrl?: string | null; dataUrl?: string | null }
   | { status: "listing"; result: ListingRankSnapshot };
 
 const ENRICH_PHASES = new Set(["snapshot-ready", "enrich-start", "enrich-product-done", "enrich-product-failed", "enrich-complete", "enrich-failed"]);
@@ -68,7 +68,13 @@ export function App() {
     };
     try {
       const res = await checkProduct(url, { runId, maxPages: pagesNum });
-      if (res.success) setState({ status: "scrape", result: res.result, fileBaseUrl: res.fileBaseUrl });
+      if (res.success)
+        setState({
+          status: "scrape",
+          result: res.result,
+          fileBaseUrl: res.fileBaseUrl,
+          dataUrl: res.dataUrl,
+        });
       else setState({ status: "error", error: res.error });
     } catch (err) {
       setState({ status: "error", error: { code: "NETWORK_ERROR", message: (err as Error).message } });
@@ -198,9 +204,13 @@ export function App() {
           )}
           {state.status === "scrape" &&
             (state.result.kind === "collection" ? (
-              <CollectionSummary result={state.result} />
+              <CollectionSummary result={state.result} dataUrl={state.dataUrl ?? null} />
             ) : (
-              <ResultSummary result={state.result} fileBaseUrl={state.fileBaseUrl ?? ""} />
+              <ResultSummary
+                result={state.result}
+                fileBaseUrl={state.fileBaseUrl ?? ""}
+                dataUrl={state.dataUrl ?? null}
+              />
             ))}
           {state.status === "listing" && (
             <>

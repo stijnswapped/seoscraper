@@ -17,7 +17,11 @@ import {
   validateAndNormalizeUrl,
 } from "../utils/url.js";
 import type { CheerioAPI } from "cheerio";
-import { loadRenderedPage, withBrowserSession } from "../services/pageLoader.js";
+import {
+  loadRenderedPage,
+  withBrowserSession,
+  type BrowserSession,
+} from "../services/pageLoader.js";
 import type { LoadedPage } from "../services/pageLoader.js";
 import { extractMetadata } from "../services/metadataExtractor.js";
 import { extractProduct } from "../services/productExtractor.js";
@@ -39,18 +43,27 @@ import {
   type ProgressReporter,
 } from "../services/progressHub.js";
 import { requireApiKeyAuth } from "../services/apiAuth.js";
+import { runWithConcurrency } from "../utils/concurrency.js";
 
 const log = createLogger("checkProduct");
+const COLLECTION_PATH_PATTERNS = [
+  /\/collections(?:\/|$)/i,
+  /\/category(?:\/|$)/i,
+  /\/categories(?:\/|$)/i,
+  /\/shop(?:\/|$)/i,
+];
 
 const bodySchema = z.object({
   url: z.string().min(1, "url is required"),
   runId: z.string().min(1).optional(),
   maxPages: z.number().int().positive().optional(),
+  responseMode: z.enum(["full", "url"]).optional(),
 });
 
 interface ApiResult {
   result: CheckResult;
   fileBaseUrl?: string;
+  dataUrl?: string;
 }
 
 export async function runCheck(
@@ -66,59 +79,73 @@ export async function runCheck(
 
   progress({ phase: "loading", message: "Rendering input URL.", url: url.toString() });
 
-  // One browser session covers page 1 + (for collections) the pagination crawl.
-  const discovery = await withBrowserSession(async (session) => {
-    const page = await session.loadPage(url.toString());
-    progress({ phase: "loaded", message: "Input URL loaded and settled.", url: page.finalUrl });
+  return withBrowserSession(async (session) => {
+   const page = await session.loadPage(url.toString(), {
+     scrollProfile: guessScrollProfile(url),
+   });
+   progress({ phase: "loaded", message: "Input URL loaded and settled.", url: page.finalUrl });
 
-    const meta = extractMetadata(page.html, page.finalUrl);
-    const collection = discoverCollectionProducts(meta, page.finalUrl, maxProducts);
-    if (!collection.isCollection) {
-      return { isCollection: false as const, page, meta };
-    }
+   const meta = extractMetadata(page.html, page.finalUrl);
+   const collection = discoverCollectionProducts(meta, page.finalUrl, maxProducts);
+   if (!collection.isCollection) {
+     return processProductPage(inputUrl, hostname, page, meta, progress);
+   }
 
-    const urls = new Map<string, string>();
-    const addFrom = ($: CheerioAPI, finalUrl: string) => {
-      for (const productUrl of extractProductUrlsFromPage($, finalUrl)) {
-        if (urls.size >= maxProducts) break;
-        if (!urls.has(productUrl)) urls.set(productUrl, productUrl);
-      }
-    };
+   const urls = new Map<string, string>();
+   const addFrom = ($: CheerioAPI, finalUrl: string) => {
+     for (const productUrl of extractProductUrlsFromPage($, finalUrl)) {
+       if (urls.size >= maxProducts) break;
+       if (!urls.has(productUrl)) urls.set(productUrl, productUrl);
+     }
+   };
 
-    await crawlPages(
-      session,
-      page.finalUrl,
-      {
-        maxPages,
-        progress,
-        label: "Scanning collection",
-        firstPage: page,
-        shouldStop: () => urls.size >= maxProducts,
-      },
-      ({ $, finalUrl }) => addFrom($, finalUrl),
-    );
+   await crawlPages(
+     session,
+     page.finalUrl,
+     {
+       maxPages,
+       progress,
+       label: "Scanning collection",
+       scrollProfile: "listing",
+       firstPage: page,
+       shouldStop: () => urls.size >= maxProducts,
+     },
+     ({ $, finalUrl }) => addFrom($, finalUrl),
+   );
 
-    return {
-      isCollection: true as const,
-      page,
-      productUrls: [...urls.values()].slice(0, maxProducts),
-    };
+   return runCollectionCheck(
+     inputUrl,
+     hostname,
+     page,
+     meta,
+     [...urls.values()].slice(0, maxProducts),
+     session,
+     progress,
+   );
   });
-
-  if (discovery.isCollection) {
-    return runCollectionCheck(inputUrl, hostname, discovery.page, discovery.productUrls, progress);
-  }
-  return processProductPage(inputUrl, hostname, discovery.page, discovery.meta, progress);
 }
 
-export async function runSingleProductCheck(inputUrl: string, progress: ProgressReporter = () => {}): Promise<{
+function guessScrollProfile(url: URL): "product" | "listing" {
+  return COLLECTION_PATH_PATTERNS.some((pattern) => pattern.test(url.pathname))
+   ? "listing"
+   : "product";
+}
+
+export async function runSingleProductCheck(
+  inputUrl: string,
+  progress: ProgressReporter = () => {},
+  session?: BrowserSession,
+): Promise<{
   result: ProductCheckResult;
   fileBaseUrl: string;
+  dataUrl: string;
 }> {
   const { url, hostname } = validateAndNormalizeUrl(inputUrl);
   assertDomainAllowed(hostname);
   progress({ phase: "loading-product", message: "Rendering product page.", url: url.toString() });
-  const page = await loadRenderedPage(url.toString());
+  const page = session
+   ? await session.loadPage(url.toString(), { scrollProfile: "product" })
+   : await loadRenderedPage(url.toString());
   progress({ phase: "loaded-product", message: "Product page loaded.", url: page.finalUrl });
   const meta = extractMetadata(page.html, page.finalUrl);
   return processProductPage(inputUrl, hostname, page, meta, progress);
@@ -133,6 +160,7 @@ async function processProductPage(
 ): Promise<{
   result: ProductCheckResult;
   fileBaseUrl: string;
+  dataUrl: string;
 }> {
   const warnings: string[] = [];
   const errors: string[] = [];
@@ -224,23 +252,27 @@ async function processProductPage(
   await writeData(run, result);
 
   const fileBaseUrl = `/files/runs/${run.runId}`;
+  const dataUrl = `${fileBaseUrl}/data.json`;
   log.info("check complete", {
     finalUrl: page.finalUrl,
     downloaded: images.downloaded.length,
     runDir: run.runDir,
   });
-  return { result, fileBaseUrl };
+  return { result, fileBaseUrl, dataUrl };
 }
 
 async function runCollectionCheck(
   inputUrl: string,
   hostname: string,
   page: LoadedPage,
+  meta: ReturnType<typeof extractMetadata>,
   discoveredProductUrls: string[],
+  session: BrowserSession,
   progress: ProgressReporter = () => {},
 ): Promise<ApiResult> {
-  const products: CollectionProductResult[] = [];
+  const products: CollectionProductResult[] = new Array(discoveredProductUrls.length);
   const warnings: string[] = [];
+  const run = await createRun(sitesConfig.output.baseDir, hostname);
 
   progress({
     phase: "collection-discovered",
@@ -257,7 +289,7 @@ async function runCollectionCheck(
     warnings.push(`Collection discovery stopped at ${sitesConfig.collections.maxProducts} products.`);
   }
 
-  for (const [index, productUrl] of discoveredProductUrls.entries()) {
+  await runWithConcurrency(discoveredProductUrls, sitesConfig.scraping.concurrency, async (productUrl, index) => {
     const current = index + 1;
     progress({
       phase: "product-start",
@@ -267,13 +299,13 @@ async function runCollectionCheck(
       total: discoveredProductUrls.length,
     });
     try {
-      const productResult = await runSingleProductCheck(productUrl, progress);
-      products.push({
+      const productResult = await runSingleProductCheck(productUrl, progress, session);
+      products[index] = {
         url: productUrl,
         success: true,
         result: productResult.result,
         fileBaseUrl: productResult.fileBaseUrl,
-      });
+      };
       progress({
         phase: "product-complete",
         message: `Finished product ${current} of ${discoveredProductUrls.length}.`,
@@ -290,23 +322,23 @@ async function runCollectionCheck(
         total: discoveredProductUrls.length,
       });
       if (err instanceof CheckError) {
-        products.push({
+        products[index] = {
           url: productUrl,
           success: false,
           error: { code: err.code, message: err.message },
-        });
+        };
       } else {
-        products.push({
+        products[index] = {
           url: productUrl,
           success: false,
           error: {
             code: "UNKNOWN_ERROR",
             message: (err as Error).message || "An unexpected error occurred.",
           },
-        });
+        };
       }
     }
-  }
+  });
 
   const succeeded = products.filter((product) => product.success).length;
   const failed = products.length - succeeded;
@@ -333,7 +365,12 @@ async function runCollectionCheck(
     succeeded,
     failed,
   });
-  return { result };
+  await writeRaw(run, page.html, meta.raw);
+  await writeData(run, result);
+
+  const fileBaseUrl = `/files/runs/${run.runId}`;
+  const dataUrl = `${fileBaseUrl}/data.json`;
+  return { result, fileBaseUrl, dataUrl };
 }
 
 function collectFieldWarnings(
@@ -374,8 +411,17 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
     const progress = createProgressReporter(parsed.data.runId);
     try {
       progress({ phase: "queued", message: "Check request accepted.", url: parsed.data.url });
-      const { result, fileBaseUrl } = await runCheck(parsed.data.url, progress, parsed.data.maxPages);
-      return reply.send({ success: true, result, fileBaseUrl });
+      const { result, fileBaseUrl, dataUrl } = await runCheck(parsed.data.url, progress, parsed.data.maxPages);
+      if (parsed.data.responseMode === "url") {
+        return reply.send({
+          success: true,
+          kind: result.kind,
+          fileBaseUrl,
+          dataUrl,
+          ...(result.kind === "collection" ? { summary: result.summary } : {}),
+        });
+      }
+      return reply.send({ success: true, result, fileBaseUrl, dataUrl });
     } catch (err) {
       if (err instanceof CheckError) {
         const status = err.code === "DOMAIN_NOT_ALLOWED" || err.code === "INVALID_URL" ? 400 : 502;

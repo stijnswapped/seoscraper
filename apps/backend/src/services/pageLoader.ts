@@ -11,9 +11,14 @@ export interface LoadedPage {
   title: string;
 }
 
+export interface LoadPageOptions {
+  /** "product" uses a short scroll budget; "listing" uses the long one. */
+  scrollProfile?: "product" | "listing";
+}
+
 /** A browser session that can render multiple pages without relaunching Chromium. */
 export interface BrowserSession {
-  loadPage(url: string): Promise<LoadedPage>;
+  loadPage(url: string, opts?: LoadPageOptions): Promise<LoadedPage>;
 }
 
 /**
@@ -29,7 +34,13 @@ export async function withBrowserSession<T>(
   try {
     browserInstance = await chromium.launch({
       headless: true,
-      args: ["--disable-blink-features=AutomationControlled"],
+      args: [
+        "--disable-blink-features=AutomationControlled",
+        // Container-friendly flags (Railway): avoid /dev/shm crashes + GPU overhead.
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+      ],
     });
     const context = await browserInstance.newContext({
       userAgent: browser.userAgent,
@@ -41,7 +52,7 @@ export async function withBrowserSession<T>(
     });
 
     const session: BrowserSession = {
-      async loadPage(url: string): Promise<LoadedPage> {
+      async loadPage(url: string, opts?: LoadPageOptions): Promise<LoadedPage> {
         const page = await context.newPage();
         page.setDefaultTimeout(browser.timeoutMs);
         try {
@@ -58,7 +69,11 @@ export async function withBrowserSession<T>(
             throw new CheckError("PAGE_LOAD_FAILED", `Page returned HTTP ${response.status()}.`);
           }
 
-          await autoScroll(page, browser.scrollTimeoutMs, browser.scrollSettleRounds);
+          const scrollTimeout =
+            opts?.scrollProfile === "listing"
+              ? browser.scrollTimeoutMs
+              : browser.productScrollTimeoutMs;
+          await autoScroll(page, scrollTimeout, browser.scrollSettleRounds);
 
           const html = await page.content();
           const finalUrl = page.url();
@@ -83,7 +98,7 @@ export async function withBrowserSession<T>(
 
 /** Render a single page (convenience wrapper around a one-shot session). */
 export async function loadRenderedPage(url: string): Promise<LoadedPage> {
-  return withBrowserSession((session) => session.loadPage(url));
+  return withBrowserSession((session) => session.loadPage(url, { scrollProfile: "product" }));
 }
 
 /**

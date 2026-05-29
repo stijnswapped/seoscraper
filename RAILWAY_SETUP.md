@@ -1,15 +1,15 @@
 # Deploying SEOSCRAPE to Railway
 
-This guide gets the backend (Fastify + Playwright + sharp + Postgres) running on[Railway](https://railway.com) with persistent image storage and the listingrank tracker enabled.
+This guide gets the backend (Fastify + Playwright + sharp + Postgres) running on [Railway](https://railway.com) with persistent image storage and the listing-rank tracker enabled.
 
 The repo ships everything Railway needs:
 
--   **`Dockerfile`** — Node 20 image that installs deps and Chromium (with all OSlibraries via `playwright install --with-deps chromium`). Playwright "justworks" — no fighting Nixpacks for browser dependencies.
--   **`railway.json`** — tells Railway to build from the Dockerfile, run thehealth check on `/health`, and restart on failure.
--   **`.dockerignore`** — keeps `node_modules`, `output/`, and secrets out of thebuild context.
+-   **`Dockerfile`** — Node 20 image that installs deps and Chromium (with all OS libraries via `playwright install --with-deps chromium`). Playwright "just works" — no fighting Nixpacks for browser dependencies.
+-   **`railway.json`** — tells Railway to build from the Dockerfile, run the health check on `/health`, and restart on failure.
+-   **`.dockerignore`** — keeps `node_modules`, `output/`, and secrets out of the build context.
 -   **`.env.example`** — the full list of variables (copy values into Railway).
 
-On boot the server **auto-runs database migrations** when `DATABASE_URL` is set,binds to `0.0.0.0`, and uses Railway's injected `PORT`.
+On boot the server **auto-runs database migrations** when `DATABASE_URL` is set, binds to `0.0.0.0`, and uses Railway's injected `PORT`.
 
 ---
 
@@ -107,6 +107,30 @@ Used when `ALLOW_ALL_DOMAINS=false`.
 
 Optional.
 
+`SCRAPE_CONCURRENCY`
+
+`4`
+
+Set this to match the machine size: roughly 1 concurrent page per vCPU.
+
+`IMAGE_CONCURRENCY`
+
+`6`
+
+Per-product image download parallelism.
+
+`PRODUCT_SCROLL_TIMEOUT_MS`
+
+`5000`
+
+Short scroll budget for product pages.
+
+`LISTING_SCROLL_TIMEOUT_MS`
+
+`15000`
+
+Long scroll budget for collection/listing pages.
+
 You do **not** need to set `PORT` or `HOST`:
 
 -   `PORT` is injected by Railway.
@@ -141,7 +165,7 @@ Downloaded images are visible under `https://<service>.up.railway.app/files/runs
 
 ## 8. Resource sizing
 
-Chromium is memory-hungry. Recommended service size: **at least 1 GB RAM**(2 GB if you scrape large collections). If checks fail intermittently withcrashes or timeouts, bump the memory in **Service → Settings → Resources**.
+Chromium is memory-hungry. Recommended service size: **about 2 vCPU / 2-4 GB RAM** with `SCRAPE_CONCURRENCY=4`. Rule of thumb: keep concurrency matched to the box at about 1 page per vCPU and ~250-350 MB per page.
 
 ---
 

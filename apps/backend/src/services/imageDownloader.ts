@@ -9,6 +9,7 @@ import type {
 import { sitesConfig } from "../../../../config/sites.config.js";
 import { createLogger } from "../utils/logger.js";
 import { extFromContentType, sanitizeSegment } from "../utils/filesystem.js";
+import { runWithConcurrency } from "../utils/concurrency.js";
 import {
   extractFeatures,
   selectImages,
@@ -36,27 +37,26 @@ export async function downloadAndSelect(
   await mkdir(tempDir, { recursive: true });
   await mkdir(imagesDir, { recursive: true });
 
-  const candidates: CandidateImage[] = [];
+  const candidates: Array<CandidateImage | null> = new Array(discovered.length).fill(null);
   const skipped: SkippedImage[] = [];
   let failures = 0;
 
   // --- Download + feature extraction --------------------------------------
-  for (let i = 0; i < discovered.length; i++) {
-    const img = discovered[i];
-    if (!img) continue;
+  await runWithConcurrency(discovered, cfg.downloadConcurrency, async (img, index) => {
+    if (!img) return;
     try {
       const { buffer, contentType } = await fetchImage(img.normalizedUrl, cfg.maxBytesPerImage);
-      const tempPath = path.join(tempDir, `cand-${String(i).padStart(3, "0")}`);
+      const tempPath = path.join(tempDir, `cand-${String(index).padStart(3, "0")}`);
       await writeFile(tempPath, buffer);
       const features = await extractFeatures(buffer);
-      candidates.push({
+      candidates[index] = {
         originalUrl: img.normalizedUrl,
         tempPath,
         filenameHint: deriveLabel(img),
         bytes: buffer.byteLength,
         ...(contentType ? { contentType } : {}),
         features,
-      });
+      };
     } catch (err) {
       failures++;
       skipped.push({
@@ -65,11 +65,15 @@ export async function downloadAndSelect(
       });
       log.warn("image failed", { url: img.normalizedUrl, message: (err as Error).message });
     }
-  }
+  });
 
   // --- Selection -----------------------------------------------------------
   const selection = selectImages(
-    { candidates, processingFailures: failures, totalAttempted: discovered.length },
+    {
+      candidates: candidates.filter((candidate): candidate is CandidateImage => candidate != null),
+      processingFailures: failures,
+      totalAttempted: discovered.length,
+    },
     cfg,
   );
 
