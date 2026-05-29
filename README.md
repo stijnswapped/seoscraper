@@ -213,6 +213,60 @@ Response still uses:
 result.kind === "product" | "collection"
 ```
 
+### Worker Shopify and Sitemap Fallbacks
+
+Worker mode is fetch-first, but it now tries extra static ecommerce sources before giving up.
+
+For Shopify product URLs like:
+
+```text
+https://store.com/products/product-handle
+```
+
+the Worker may also try:
+
+```text
+/products/product-handle.js
+/products/product-handle.json
+```
+
+These endpoints can improve:
+
+- product title
+- product description
+- discovered image URLs
+- structured product data
+
+For Shopify collection URLs like:
+
+```text
+https://store.com/collections/collection-handle
+```
+
+the Worker may also try:
+
+```text
+/collections/collection-handle/products.json?limit=<MAX_COLLECTION_PRODUCTS>
+```
+
+For generic stores, collection discovery can also fall back to same-origin sitemaps:
+
+```text
+/sitemap_products_1.xml
+/sitemap.xml
+```
+
+If `/sitemap.xml` points to same-origin product sitemaps, the Worker follows a small capped number of those sitemap URLs and extracts `/products/...` links.
+
+Important rules:
+
+- These fallbacks are **Worker-only**.
+- They are same-origin only.
+- They are non-fatal; if a JSON or sitemap endpoint is missing, the check continues.
+- They are capped by `MAX_COLLECTION_PRODUCTS`.
+- They do not require Chromium, Playwright, Sharp, cookies, API keys, or filesystem writes.
+- They improve static/Shopify coverage, but they still do not execute JavaScript.
+
 ### Worker Limitations
 
 The Worker mode is free and Cloudflare-compatible, but intentionally degraded:

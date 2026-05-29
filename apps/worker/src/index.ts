@@ -123,6 +123,18 @@ type CollectionCheckResult = {
 type CheckResult = ProductCheckResult | CollectionCheckResult;
 type ErrorCode = "INVALID_URL" | "DOMAIN_NOT_ALLOWED" | "PAGE_LOAD_FAILED" | "UNKNOWN_ERROR";
 
+type ProductUrlCandidate = {
+  url: string;
+  source: "html" | "shopify_collection_json" | "sitemap";
+};
+
+type ShopifyProductEnrichment = {
+  title?: string;
+  description?: string;
+  images: string[];
+  structuredData: Record<string, unknown>;
+};
+
 type Env = {
   ALLOW_ALL_DOMAINS?: string;
   ALLOWED_DOMAINS?: string;
@@ -188,19 +200,26 @@ async function runCheck(inputUrl: string, env: Env): Promise<CheckResult> {
   assertDomainAllowed(parsed.hostname, env);
 
   const page = await fetchPage(parsed.toString());
-  const discoveredProductUrls = discoverProductUrls(page.html, page.finalUrl, getMaxProducts(env));
-  const isCollection = isLikelyCollection(page.finalUrl, page.html, discoveredProductUrls.length);
+  const maxProducts = getMaxProducts(env);
+  const htmlProductUrls = discoverProductUrls(page.html, page.finalUrl, maxProducts);
+  const isCollection = isLikelyCollection(page.finalUrl, page.html, htmlProductUrls.length);
 
-  if (!isCollection) return processProductPage(inputUrl, page);
+  if (!isCollection) {
+    const enrichment = await fetchShopifyProductEnrichment(page.finalUrl);
+    return processProductPage(inputUrl, page, enrichment);
+  }
 
+  const candidates = await discoverProductUrlCandidates(page.html, page.finalUrl, maxProducts);
+  const discoveredProductUrls = candidates.map((candidate) => candidate.url);
   const products: CollectionProductResult[] = [];
   for (const productUrl of discoveredProductUrls) {
     try {
       const productPage = await fetchPage(productUrl);
+      const enrichment = await fetchShopifyProductEnrichment(productPage.finalUrl);
       products.push({
         url: productUrl,
         success: true,
-        result: processProductPage(productUrl, productPage),
+        result: processProductPage(productUrl, productPage, enrichment),
         fileBaseUrl: null,
       });
     } catch (err) {
@@ -216,7 +235,11 @@ async function runCheck(inputUrl: string, env: Env): Promise<CheckResult> {
   }
 
   const warnings = workerWarnings();
-  if (discoveredProductUrls.length === 0) warnings.push("No static product links were discovered in the initial HTML.");
+  if (htmlProductUrls.length === 0) warnings.push("No static product links were discovered in the initial HTML.");
+  const shopifyCount = candidates.filter((candidate) => candidate.source === "shopify_collection_json").length;
+  const sitemapCount = candidates.filter((candidate) => candidate.source === "sitemap").length;
+  if (shopifyCount > 0) warnings.push(`Shopify collection JSON fallback discovered ${shopifyCount} product URL(s).`);
+  if (sitemapCount > 0) warnings.push(`Sitemap fallback discovered ${sitemapCount} product URL(s).`);
 
   const succeeded = products.filter((product) => product.success).length;
   return {
@@ -267,7 +290,7 @@ async function fetchPage(url: string): Promise<LoadedPage> {
   };
 }
 
-function processProductPage(inputUrl: string, page: LoadedPage): ProductCheckResult {
+function processProductPage(inputUrl: string, page: LoadedPage, enrichment: ShopifyProductEnrichment | null = null): ProductCheckResult {
   const checkedAt = new Date().toISOString();
   const domain = new URL(page.finalUrl).hostname;
   const warnings = workerWarnings();
@@ -279,18 +302,22 @@ function processProductPage(inputUrl: string, page: LoadedPage): ProductCheckRes
   const jsonLd = extractJsonLd(page.html);
   const productNode = findJsonLdByType(jsonLd, "Product");
 
-  const title = pickTitle(page.html, openGraph, twitter, productNode);
-  const description = pickDescription(page.html, openGraph, twitter, productNode);
+  const title = pickTitle(page.html, openGraph, twitter, productNode, enrichment);
+  const description = pickDescription(page.html, openGraph, twitter, productNode, enrichment);
   const canonicalUrl = pickCanonical(page.html, openGraph, page.finalUrl);
-  const productTitle = pickProductTitle(page.html, productNode, openGraph);
-  const productDescription = pickProductDescription(page.html, productNode, openGraph);
-  const discoveredImages = discoverImages(page.html, page.finalUrl, openGraph, twitter, productNode);
-  const structuredData = jsonLd.filter((node) => isStructuredProductNode(node));
+  const productTitle = pickProductTitle(page.html, productNode, openGraph, enrichment);
+  const productDescription = pickProductDescription(page.html, productNode, openGraph, enrichment);
+  const discoveredImages = discoverImages(page.html, page.finalUrl, openGraph, twitter, productNode, enrichment);
+  const structuredData = [
+    ...jsonLd.filter((node) => isStructuredProductNode(node)),
+    ...(enrichment ? [enrichment.structuredData] : []),
+  ];
   const errors: string[] = [];
 
   if (!productNode && !productTitle.value && !productDescription.value) {
     warnings.push("No Product JSON-LD or strong product fields found in initial HTML.");
   }
+  if (enrichment) warnings.push("Shopify product JSON fallback enriched this Worker result.");
 
   const seoSnapshot: SeoSnapshot = {
     inputUrl,
@@ -346,6 +373,7 @@ function pickTitle(
   openGraph: Record<string, string>,
   twitter: Record<string, string>,
   productNode: Record<string, unknown> | null,
+  enrichment: ShopifyProductEnrichment | null,
 ): ExtractedField<string | null> {
   const title = cleanText(matchFirst(html, /<title[^>]*>([\s\S]*?)<\/title>/i));
   if (title) return field(title, "title_tag", 0.95);
@@ -353,6 +381,7 @@ function pickTitle(
   if (twitter["twitter:title"]) return field(twitter["twitter:title"], "twitter:title", 0.85);
   const productName = cleanText(asString(productNode?.["name"]));
   if (productName) return field(productName, "jsonld:Product.name", 0.95);
+  if (enrichment?.title) return field(enrichment.title, "shopify:product.title", 0.9);
   const h1 = cleanText(matchFirst(html, /<h1[^>]*>([\s\S]*?)<\/h1>/i));
   if (h1) return field(h1, "h1", 0.65, ["Title taken from first h1 fallback."]);
   return emptyField("No SEO title found.");
@@ -363,6 +392,7 @@ function pickDescription(
   openGraph: Record<string, string>,
   twitter: Record<string, string>,
   productNode: Record<string, unknown> | null,
+  enrichment: ShopifyProductEnrichment | null,
 ): ExtractedField<string | null> {
   const meta = getMetaContent(html, "name", "description");
   if (meta) return field(meta, "meta_description", 0.9);
@@ -370,6 +400,7 @@ function pickDescription(
   if (twitter["twitter:description"]) return field(twitter["twitter:description"], "twitter:description", 0.8);
   const productDescription = cleanText(asString(productNode?.["description"]));
   if (productDescription) return field(productDescription, "jsonld:Product.description", 0.95);
+  if (enrichment?.description) return field(enrichment.description, "shopify:product.description", 0.85);
   return emptyField("No SEO description found.");
 }
 
@@ -386,18 +417,30 @@ function pickCanonical(html: string, openGraph: Record<string, string>, finalUrl
   return emptyField("No canonical URL found.");
 }
 
-function pickProductTitle(html: string, productNode: Record<string, unknown> | null, openGraph: Record<string, string>): ExtractedField<string | null> {
+function pickProductTitle(
+  html: string,
+  productNode: Record<string, unknown> | null,
+  openGraph: Record<string, string>,
+  enrichment: ShopifyProductEnrichment | null,
+): ExtractedField<string | null> {
   const name = cleanText(asString(productNode?.["name"]));
   if (name) return field(name, "jsonld:Product.name", 0.95);
+  if (enrichment?.title) return field(enrichment.title, "shopify:product.title", 0.9);
   if (openGraph["og:title"]) return field(openGraph["og:title"], "og:title", 0.85);
   const h1 = cleanText(matchFirst(html, /<h1[^>]*>([\s\S]*?)<\/h1>/i));
   if (h1) return field(h1, "h1", 0.7);
   return emptyField("No product title found.");
 }
 
-function pickProductDescription(html: string, productNode: Record<string, unknown> | null, openGraph: Record<string, string>): ExtractedField<string | null> {
+function pickProductDescription(
+  html: string,
+  productNode: Record<string, unknown> | null,
+  openGraph: Record<string, string>,
+  enrichment: ShopifyProductEnrichment | null,
+): ExtractedField<string | null> {
   const desc = cleanText(asString(productNode?.["description"]));
   if (desc) return field(desc, "jsonld:Product.description", 0.95);
+  if (enrichment?.description) return field(enrichment.description, "shopify:product.description", 0.9);
   if (openGraph["og:description"]) return field(openGraph["og:description"], "og:description", 0.8);
   const meta = getMetaContent(html, "name", "description");
   if (meta) return field(meta, "meta_description", 0.75);
@@ -414,12 +457,222 @@ function discoverProductUrls(html: string, finalUrl: string, maxProducts: number
   return [...urls.values()];
 }
 
+async function discoverProductUrlCandidates(html: string, finalUrl: string, maxProducts: number): Promise<ProductUrlCandidate[]> {
+  const candidates = new Map<string, ProductUrlCandidate>();
+  const add = (url: string | null, source: ProductUrlCandidate["source"]): void => {
+    if (!url || candidates.size >= maxProducts || candidates.has(url)) return;
+    candidates.set(url, { url, source });
+  };
+
+  for (const url of discoverProductUrls(html, finalUrl, maxProducts)) add(url, "html");
+  for (const url of await fetchShopifyCollectionProductUrls(finalUrl, maxProducts)) add(url, "shopify_collection_json");
+
+  if (candidates.size < maxProducts) {
+    for (const url of await fetchSitemapProductUrls(finalUrl, maxProducts - candidates.size)) add(url, "sitemap");
+  }
+
+  return [...candidates.values()];
+}
+
+async function fetchShopifyProductEnrichment(finalUrl: string): Promise<ShopifyProductEnrichment | null> {
+  const productJsonUrls = getShopifyProductJsonUrls(finalUrl);
+  for (const url of productJsonUrls) {
+    const data = await fetchJson(url);
+    const product = unwrapShopifyProduct(data);
+    if (!product) continue;
+    const enrichment = normalizeShopifyProduct(product);
+    if (enrichment) return enrichment;
+  }
+  return null;
+}
+
+async function fetchShopifyCollectionProductUrls(finalUrl: string, maxProducts: number): Promise<string[]> {
+  const collectionUrl = getShopifyCollectionJsonUrl(finalUrl, maxProducts);
+  if (!collectionUrl) return [];
+  const data = await fetchJson(collectionUrl);
+  if (!data || typeof data !== "object") return [];
+  const products = (data as Record<string, unknown>)["products"];
+  if (!Array.isArray(products)) return [];
+  const urls: string[] = [];
+  for (const product of products) {
+    if (urls.length >= maxProducts || !product || typeof product !== "object") break;
+    const handle = asString((product as Record<string, unknown>)["handle"]);
+    if (!handle) continue;
+    const normalized = normalizeProductUrl(`/products/${handle}`, finalUrl);
+    if (normalized && !urls.includes(normalized)) urls.push(normalized);
+  }
+  return urls;
+}
+
+async function fetchSitemapProductUrls(finalUrl: string, maxProducts: number): Promise<string[]> {
+  if (maxProducts <= 0) return [];
+  const origin = new URL(finalUrl).origin;
+  const sitemapUrls = [`${origin}/sitemap_products_1.xml`, `${origin}/sitemap.xml`];
+  const nestedSitemaps: string[] = [];
+  const productUrls = new Map<string, string>();
+
+  for (const sitemapUrl of sitemapUrls) {
+    if (productUrls.size >= maxProducts) break;
+    const text = await fetchText(sitemapUrl);
+    if (!text) continue;
+    collectSitemapProductUrls(text, finalUrl, maxProducts, productUrls);
+    collectNestedProductSitemaps(text, finalUrl, nestedSitemaps);
+  }
+
+  for (const sitemapUrl of nestedSitemaps.slice(0, 5)) {
+    if (productUrls.size >= maxProducts) break;
+    const text = await fetchText(sitemapUrl);
+    if (!text) continue;
+    collectSitemapProductUrls(text, finalUrl, maxProducts, productUrls);
+  }
+
+  return [...productUrls.values()];
+}
+
+function getShopifyProductJsonUrls(finalUrl: string): string[] {
+  const parsed = new URL(finalUrl);
+  const match = parsed.pathname.match(/^(.*?\/products\/[^/?#]+)/i);
+  const productPath = match?.[1]?.replace(/\/+$/, "");
+  if (!productPath) return [];
+  return [`${parsed.origin}${productPath}.js`, `${parsed.origin}${productPath}.json`];
+}
+
+function getShopifyCollectionJsonUrl(finalUrl: string, maxProducts: number): string | null {
+  const parsed = new URL(finalUrl);
+  const match = parsed.pathname.match(/^(.*?\/collections\/[^/?#]+)/i);
+  const collectionPath = match?.[1]?.replace(/\/+$/, "");
+  if (!collectionPath) return null;
+  return `${parsed.origin}${collectionPath}/products.json?limit=${Math.min(maxProducts, 250)}`;
+}
+
+async function fetchJson(url: string): Promise<unknown | null> {
+  try {
+    const response = await fetch(url, {
+      redirect: "follow",
+      headers: {
+        "user-agent": REAL_CHROME_UA,
+        accept: "application/json,text/plain,*/*;q=0.8",
+        "accept-language": "en-US,en;q=0.9",
+      },
+    });
+    if (!response.ok) return null;
+    if (!sameOrigin(url, response.url || url)) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+async function fetchText(url: string): Promise<string | null> {
+  try {
+    const response = await fetch(url, {
+      redirect: "follow",
+      headers: {
+        "user-agent": REAL_CHROME_UA,
+        accept: "application/xml,text/xml,text/plain,*/*;q=0.8",
+        "accept-language": "en-US,en;q=0.9",
+      },
+    });
+    if (!response.ok) return null;
+    if (!sameOrigin(url, response.url || url)) return null;
+    return await response.text();
+  } catch {
+    return null;
+  }
+}
+
+function sameOrigin(left: string, right: string): boolean {
+  const a = new URL(left);
+  const b = new URL(right);
+  return a.protocol === b.protocol && a.hostname.toLowerCase() === b.hostname.toLowerCase() && a.port === b.port;
+}
+
+function unwrapShopifyProduct(data: unknown): Record<string, unknown> | null {
+  if (!data || typeof data !== "object") return null;
+  const obj = data as Record<string, unknown>;
+  const product = obj["product"];
+  if (product && typeof product === "object") return product as Record<string, unknown>;
+  if (obj["title"] || obj["handle"] || obj["images"]) return obj;
+  return null;
+}
+
+function normalizeShopifyProduct(product: Record<string, unknown>): ShopifyProductEnrichment | null {
+  const title = cleanText(asString(product["title"]));
+  const description = cleanText(asString(product["description"]) ?? asString(product["body_html"]));
+  const images = collectShopifyImages(product);
+  if (!title && !description && images.length === 0) return null;
+  return {
+    ...(title ? { title } : {}),
+    ...(description ? { description } : {}),
+    images,
+    structuredData: {
+      source: "shopify_product_json",
+      title,
+      description,
+      handle: asString(product["handle"]),
+      vendor: asString(product["vendor"]),
+      productType: asString(product["product_type"]) ?? asString(product["type"]),
+      variants: Array.isArray(product["variants"]) ? product["variants"] : [],
+      images,
+    },
+  };
+}
+
+function collectShopifyImages(product: Record<string, unknown>): string[] {
+  const out = new Set<string>();
+  const add = (value: unknown): void => {
+    if (typeof value === "string" && value.trim()) out.add(value);
+    if (value && typeof value === "object") {
+      const obj = value as Record<string, unknown>;
+      const src = asString(obj["src"]) ?? asString(obj["url"]);
+      if (src) out.add(src);
+    }
+  };
+  add(product["featured_image"]);
+  const image = product["image"];
+  if (Array.isArray(image)) image.forEach(add);
+  else add(image);
+  const images = product["images"];
+  if (Array.isArray(images)) images.forEach(add);
+  return [...out].slice(0, 30);
+}
+
+function collectSitemapProductUrls(text: string, finalUrl: string, maxProducts: number, out: Map<string, string>): void {
+  for (const loc of extractSitemapLocs(text)) {
+    if (out.size >= maxProducts) break;
+    const normalized = normalizeProductUrl(loc, finalUrl);
+    if (normalized && !out.has(normalized)) out.set(normalized, normalized);
+  }
+}
+
+function collectNestedProductSitemaps(text: string, finalUrl: string, out: string[]): void {
+  const base = new URL(finalUrl);
+  for (const loc of extractSitemapLocs(text)) {
+    const normalized = normalizeUrl(loc, finalUrl);
+    if (!normalized) continue;
+    const parsed = new URL(normalized);
+    if (parsed.hostname.toLowerCase() !== base.hostname.toLowerCase()) continue;
+    if (!/sitemap/i.test(parsed.pathname) || !/product/i.test(parsed.pathname)) continue;
+    if (!out.includes(normalized)) out.push(normalized);
+  }
+}
+
+function extractSitemapLocs(text: string): string[] {
+  const out: string[] = [];
+  for (const match of text.matchAll(/<loc>\s*([\s\S]*?)\s*<\/loc>/gi)) {
+    const loc = cleanText(match[1]);
+    if (loc) out.push(loc);
+  }
+  return out;
+}
+
 function discoverImages(
   html: string,
   finalUrl: string,
   openGraph: Record<string, string>,
   twitter: Record<string, string>,
   productNode: Record<string, unknown> | null,
+  enrichment: ShopifyProductEnrichment | null,
 ): DiscoveredImage[] {
   const images = new Map<string, DiscoveredImage>();
   const add = (raw: string | undefined, source: string, alt?: string): void => {
@@ -430,6 +683,7 @@ function discoverImages(
   };
 
   collectJsonLdImages(productNode?.["image"]).forEach((image) => add(image, "jsonld"));
+  enrichment?.images.forEach((image) => add(image, "shopify:product.images"));
   add(openGraph["og:image"], "og:image");
   add(openGraph["og:image:secure_url"], "og:image");
   add(twitter["twitter:image"], "twitter:image");
