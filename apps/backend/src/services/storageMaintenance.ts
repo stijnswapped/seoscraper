@@ -43,6 +43,31 @@ export async function cleanupOldRuns(baseDir: string, maxAgeDays: number): Promi
 }
 
 /**
+ * Delete ALL research run folders under `output/runs` regardless of age. For
+ * one-off recovery (e.g. the volume filled up). Returns the number removed.
+ */
+export async function purgeAllRuns(baseDir: string): Promise<number> {
+  const runsDir = path.join(baseDir, "runs");
+  let entries: string[];
+  try {
+    entries = await readdir(runsDir);
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const name of entries) {
+    try {
+      await rm(path.join(runsDir, name), { recursive: true, force: true });
+      removed++;
+    } catch (err) {
+      log.warn("could not purge run", { name, message: (err as Error).message });
+    }
+  }
+  log.info("purged all runs", { removed });
+  return removed;
+}
+
+/**
  * Run the cleanup once now and then on a repeating interval. Safe to call at
  * startup; the interval is unref'd so it never keeps the process alive.
  */

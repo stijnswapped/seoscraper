@@ -5,6 +5,7 @@ import fastifyStatic from "@fastify/static";
 import { sitesConfig } from "../../../config/sites.config.js";
 import { registerCheckProductRoute } from "./routes/checkProduct.js";
 import { registerListingTrackerRoutes } from "./routes/listingTracker.js";
+import { registerAdminRoutes } from "./routes/admin.js";
 
 export async function buildServer(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, bodyLimit: 1_048_576, trustProxy: true });
@@ -22,6 +23,7 @@ export async function buildServer(): Promise<FastifyInstance> {
 
   registerCheckProductRoute(app);
   registerListingTrackerRoutes(app);
+  registerAdminRoutes(app);
 
   return app;
 }
