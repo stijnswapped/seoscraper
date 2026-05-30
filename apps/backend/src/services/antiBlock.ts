@@ -36,8 +36,11 @@ export interface ProxyConfig {
 export function getProxyConfig(): ProxyConfig | null {
   const raw = (process.env.SCRAPE_PROXY_URL ?? process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY ?? "").trim();
   if (!raw) return null;
+  // Tolerate a scheme-less value like "user:pass@host:port" — without an explicit
+  // "scheme://", new URL() misreads the username as the protocol and drops the host.
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`;
   try {
-    const url = new URL(raw);
+    const url = new URL(withScheme);
     const username = url.username || process.env.SCRAPE_PROXY_USERNAME?.trim() || undefined;
     const password = url.password || process.env.SCRAPE_PROXY_PASSWORD?.trim() || undefined;
     // Playwright wants the bare scheme://host:port in `server`, creds separately.

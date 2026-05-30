@@ -54,6 +54,15 @@ describe("getProxyConfig / getProxyUrl", () => {
     expect(getProxyUrl()).toBe("http://user:pass@proxy.example:8080/");
   });
 
+  it("tolerates a scheme-less value (user:pass@host:port)", () => {
+    process.env.SCRAPE_PROXY_URL = "Y6dvEhgZlGbEKXN:Tg8DQP2vBvkNLdV@51.194.96.103:41853";
+    expect(getProxyConfig()).toEqual({
+      server: "http://51.194.96.103:41853",
+      username: "Y6dvEhgZlGbEKXN",
+      password: "Tg8DQP2vBvkNLdV",
+    });
+  });
+
   it("supports split username/password env vars", () => {
     process.env.SCRAPE_PROXY_URL = "http://proxy.example:8080";
     process.env.SCRAPE_PROXY_USERNAME = "u";
