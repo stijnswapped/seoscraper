@@ -17,6 +17,7 @@ import type { ProgressReporter } from "./progressHub.js";
 import {
   createSnapshot,
   getLatestSnapshot,
+  pruneSnapshots,
   upsertTrackedListing,
   type PreviousSnapshot,
 } from "../db/listingRepository.js";
@@ -76,6 +77,11 @@ export async function trackListing(input: TrackListingInput): Promise<ListingRan
     rawMetadata: extraction.rawMetadata,
   });
   const changes = compareSnapshots(previous, snapshot.id, extraction.items);
+
+  // Keep storage flat: retain only the baseline + this latest snapshot. The diff
+  // above was already computed against the prior latest, so day-over-day change
+  // detection is preserved while old snapshots are discarded.
+  await pruneSnapshots(trackedListingId).catch(() => {});
 
   return {
     kind: "listing_rank_snapshot",

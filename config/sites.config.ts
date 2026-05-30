@@ -95,6 +95,10 @@ export interface SitesConfig {
 
   output: {
     baseDir: string;
+    /** Delete on-disk research runs older than this many days. */
+    retentionDays: number;
+    /** How often the background cleanup sweep runs. */
+    cleanupIntervalMs: number;
   };
 
   /** Parallelism for multi-product scraping (collections). */
@@ -203,6 +207,10 @@ export const sitesConfig: SitesConfig = {
   // --- Output ---------------------------------------------------------------
   output: {
     baseDir: process.env.OUTPUT_DIR ?? "output",
+    // Research runs (rendered HTML + images) are heavy but low-volume; auto-prune
+    // them so disk stays bounded. Best-seller tracking writes nothing to disk.
+    retentionDays: envInt("RUN_RETENTION_DAYS", 7),
+    cleanupIntervalMs: envInt("RUN_CLEANUP_INTERVAL_MS", 6 * 60 * 60 * 1000),
   },
 
   // --- Multi-product scraping parallelism -----------------------------------

@@ -229,6 +229,22 @@ export async function getSnapshotsForListing(
   return getLatestSnapshots(trackedListingId, limit);
 }
 
+/**
+ * Keep storage flat: retain only the baseline (oldest) and latest (newest)
+ * snapshot for a listing and delete the rest. Items cascade-delete via the
+ * `on delete cascade` FK. Returns the number of snapshots deleted.
+ */
+export async function pruneSnapshots(trackedListingId: string): Promise<number> {
+  const result = await query(
+    `delete from listing_snapshots s
+     where s.tracked_listing_id = $1
+       and s.id <> (select id from listing_snapshots where tracked_listing_id = $1 order by checked_at asc,  id asc  limit 1)
+       and s.id <> (select id from listing_snapshots where tracked_listing_id = $1 order by checked_at desc, id desc limit 1)`,
+    [trackedListingId],
+  );
+  return result.rowCount ?? 0;
+}
+
 function rowToItem(row: SnapshotItemRow): ListingRankItem {
   return {
     rank: row.rank,

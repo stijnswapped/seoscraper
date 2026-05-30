@@ -2,6 +2,7 @@ import "./env.js";
 import { buildServer } from "./server.js";
 import { runMigrations } from "./db/migrate.js";
 import { getDatabaseUrl } from "./db/postgres.js";
+import { startStorageCleanup } from "./services/storageMaintenance.js";
 import { createLogger } from "./utils/logger.js";
 
 const log = createLogger("server");
@@ -25,6 +26,9 @@ async function main(): Promise<void> {
   const app = await buildServer();
   await app.listen({ port: PORT, host: HOST });
   log.info(`listening on http://${HOST}:${PORT}`);
+
+  // Periodically prune old on-disk research runs so disk stays bounded.
+  startStorageCleanup();
 
   // Run DB migrations in the background after the server is already accepting
   // connections. This prevents Railway's healthcheck from timing out (SIGTERM)

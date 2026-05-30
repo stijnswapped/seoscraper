@@ -1,7 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { trackListing, normalizeSourceStrategy } from "../services/listingTracker.js";
-import { startListingEnrichment } from "../services/listingEnrichment.js";
 import { createProgressReporter, finishProgress } from "../services/progressHub.js";
 import { requireApiKeyAuth } from "../services/apiAuth.js";
 import { CheckError } from "../types/productCheck.js";
@@ -19,6 +18,8 @@ const trackListingBodySchema = z.object({
   maxProducts: z.number().int().positive().max(250).optional(),
   maxPages: z.number().int().positive().optional(),
   runId: z.string().min(1).optional(),
+  // Accepted for backwards compatibility but ignored: rank tracking is lean and
+  // never triggers the heavy per-product scrape. Use /api/check-product for that.
   enrich: z.boolean().optional(),
 });
 
@@ -50,20 +51,11 @@ export function registerListingTrackerRoutes(app: FastifyInstance): void {
         progress,
       });
 
-      if (parsed.data.enrich) {
-        // Fire-and-forget background scrape; it streams progress and closes the
-        // SSE stream when finished. The ranking is returned immediately below.
-        progress({
-          phase: "snapshot-ready",
-          message: `Ranking captured (${result.items.length} products). Starting background enrichment.`,
-          total: result.items.length,
-        });
-        startListingEnrichment(result, parsed.data.runId);
-      } else {
-        finishProgress(parsed.data.runId);
-      }
+      // Rank tracking is lean and DB-only: return the ranking + day-over-day
+      // changes immediately. No per-product enrichment / disk writes here.
+      finishProgress(parsed.data.runId);
 
-      return reply.send({ success: true, result, enriching: Boolean(parsed.data.enrich) });
+      return reply.send({ success: true, result, enriching: false });
     } catch (err) {
       finishProgress(parsed.data.runId);
       if (err instanceof CheckError) {
