@@ -82,6 +82,23 @@ export interface BrowserSession {
 }
 
 /**
+ * True when `navUrl` points at a different page (path) than `targetUrl`. Used to
+ * block client-side redirects (e.g. a collection that JS-redirects to the home
+ * page) while still allowing same-page navigations and http→https / www changes.
+ */
+export function isRedirectAway(targetUrl: string, navUrl: string): boolean {
+  try {
+    const target = new URL(targetUrl);
+    const nav = new URL(navUrl, targetUrl);
+    const tp = (target.pathname.replace(/\/+$/, "") || "/").toLowerCase();
+    const np = (nav.pathname.replace(/\/+$/, "") || "/").toLowerCase();
+    return tp !== np;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Launch one headless browser, run `fn` with a session that can render many
  * pages (reused context = far cheaper than a browser per URL), then close it.
  */
@@ -141,6 +158,19 @@ export async function withBrowserSession<T>(
           const html = await page.content();
           const finalUrl = page.url();
           const title = await page.title();
+
+          // Some themes JS-redirect a deep URL (e.g. a sorted collection) to the
+          // home page, which destroys the content we asked for. The browser can't
+          // keep the page alive once its own script navigates away, so signal a
+          // failure — callers fall back to a direct fetch, which (running no JS)
+          // returns the real server-rendered content at the requested URL.
+          if (isRedirectAway(url, finalUrl)) {
+            throw new CheckError(
+              "PAGE_LOAD_FAILED",
+              `Page client-side redirected away from the requested URL (to ${finalUrl}).`,
+            );
+          }
+
           log.info("loaded", { inputUrl: url, finalUrl, status: response?.status() ?? null, htmlBytes: html.length });
           return { finalUrl, html, title };
         } catch (err) {

@@ -1,6 +1,25 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { fetchPageDirect, loadPageOrFetch } from "../src/services/pageLoader.js";
+import { fetchPageDirect, loadPageOrFetch, isRedirectAway } from "../src/services/pageLoader.js";
 import { CheckError } from "../src/types/productCheck.js";
+
+describe("isRedirectAway", () => {
+  const collection = "https://jacinnewyork.co/collections/all?sort_by=best-selling";
+  it("flags a redirect to the home page", () => {
+    expect(isRedirectAway(collection, "https://jacinnewyork.co/")).toBe(true);
+  });
+  it("allows the same path (query dropped)", () => {
+    expect(isRedirectAway(collection, "https://jacinnewyork.co/collections/all")).toBe(false);
+  });
+  it("allows www/host change on the same path", () => {
+    expect(isRedirectAway(collection, "https://www.jacinnewyork.co/collections/all?sort_by=best-selling")).toBe(false);
+  });
+  it("ignores a trailing slash difference", () => {
+    expect(isRedirectAway("https://x.co/collections/all", "https://x.co/collections/all/")).toBe(false);
+  });
+  it("flags a redirect to a different product", () => {
+    expect(isRedirectAway("https://x.co/products/a", "https://x.co/products/b")).toBe(true);
+  });
+});
 
 function htmlResponse(html: string, status = 200, server = "nginx"): Response {
   const res = new Response(html, { status, headers: { "content-type": "text/html", server } });
