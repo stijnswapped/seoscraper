@@ -14,3 +14,6 @@ output/*
 # Env
 .env
 .env.local
+
+# Local planning notes (kept out of git)
+BACKLOG.md

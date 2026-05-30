@@ -3,7 +3,15 @@ import { sitesConfig } from "../../../../config/sites.config.js";
 import { CheckError } from "../types/productCheck.js";
 import { createLogger } from "../utils/logger.js";
 import { Semaphore } from "../utils/semaphore.js";
-import { STEALTH_INIT_SCRIPT, getProxyConfig, isBlockedResponse, isProxyHealthy, markProxyUnhealthy } from "./antiBlock.js";
+import {
+  STEALTH_INIT_SCRIPT,
+  buildRealisticHeaders,
+  getProxyConfig,
+  isBlockedResponse,
+  isProxyHealthy,
+  markProxyUnhealthy,
+  proxyFetch,
+} from "./antiBlock.js";
 
 /** Chromium navigation errors that indicate the proxy (not the site) is at fault. */
 const PROXY_ERROR_RE = /ERR_PROXY|ERR_TUNNEL|PROXY_CONNECTION|ERR_NO_SUPPORTED_PROXIES|ECONNREFUSED.*proxy/i;
@@ -160,6 +168,58 @@ export async function withBrowserSession<T>(
 /** Render a single page (convenience wrapper around a one-shot session). */
 export async function loadRenderedPage(url: string): Promise<LoadedPage> {
   return withBrowserSession((session) => session.loadPage(url, { scrollProfile: "product" }));
+}
+
+/**
+ * Fetch a page's HTML directly (no browser), with realistic headers + proxy.
+ * Used as a fallback when the headless browser is blocked (Cloudflare 403 /
+ * challenge) or times out — many stores serve a normal fetch fine even when they
+ * block headless Chromium. The returned HTML still contains server-rendered SEO
+ * tags (<title>, og:*, JSON-LD), which is all the metadata extractor needs.
+ */
+export async function fetchPageDirect(url: string): Promise<LoadedPage> {
+  let response: Response;
+  try {
+    response = await proxyFetch(url, { headers: buildRealisticHeaders(new URL(url).origin), redirect: "follow" });
+  } catch (err) {
+    throw new CheckError("PAGE_LOAD_FAILED", `Direct fetch failed: ${(err as Error).message}`);
+  }
+  const finalUrl = response.url || url;
+  if (!response.ok) {
+    throw new CheckError("PAGE_LOAD_FAILED", `Direct fetch returned HTTP ${response.status}.`);
+  }
+  const html = await response.text();
+  if (isBlockedResponse(response.status, html, response.headers.get("server"))) {
+    throw new CheckError("PAGE_LOAD_FAILED", "Blocked by bot protection (direct fetch).");
+  }
+  log.info("loaded via direct fetch fallback", { inputUrl: url, finalUrl, htmlBytes: html.length });
+  return { finalUrl, html, title: extractHtmlTitle(html) };
+}
+
+/**
+ * Load a page via the headless browser, falling back to a direct fetch if the
+ * browser is blocked or fails. `onFallback` is invoked (once) with the browser
+ * error before the fetch is attempted, for progress/logging.
+ */
+export async function loadPageOrFetch(
+  url: string,
+  opts: LoadPageOptions | undefined,
+  session: BrowserSession | undefined,
+  onFallback?: (reason: string) => void,
+): Promise<LoadedPage> {
+  try {
+    return session ? await session.loadPage(url, opts) : await loadRenderedPage(url);
+  } catch (err) {
+    if (!(err instanceof CheckError)) throw err;
+    onFallback?.((err as Error).message);
+    return fetchPageDirect(url);
+  }
+}
+
+/** Pull the <title> text out of raw HTML (best-effort; extractor re-derives it). */
+function extractHtmlTitle(html: string): string {
+  const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return match?.[1]?.replace(/\s+/g, " ").trim() ?? "";
 }
 
 /**

@@ -18,7 +18,7 @@ import {
 } from "../utils/url.js";
 import type { CheerioAPI } from "cheerio";
 import {
-  loadRenderedPage,
+  loadPageOrFetch,
   withBrowserSession,
   type BrowserSession,
 } from "../services/pageLoader.js";
@@ -80,9 +80,13 @@ export async function runCheck(
   progress({ phase: "loading", message: "Rendering input URL.", url: url.toString() });
 
   return withBrowserSession(async (session) => {
-   const page = await session.loadPage(url.toString(), {
-     scrollProfile: guessScrollProfile(url),
-   });
+   const page = await loadPageOrFetch(
+     url.toString(),
+     { scrollProfile: guessScrollProfile(url) },
+     session,
+     (reason) =>
+       progress({ phase: "loading", message: `Browser blocked (${reason}); retrying with direct fetch.`, url: url.toString() }),
+   );
    progress({ phase: "loaded", message: "Input URL loaded and settled.", url: page.finalUrl });
 
    const meta = extractMetadata(page.html, page.finalUrl);
@@ -143,9 +147,13 @@ export async function runSingleProductCheck(
   const { url, hostname } = validateAndNormalizeUrl(inputUrl);
   assertDomainAllowed(hostname);
   progress({ phase: "loading-product", message: "Rendering product page.", url: url.toString() });
-  const page = session
-   ? await session.loadPage(url.toString(), { scrollProfile: "product" })
-   : await loadRenderedPage(url.toString());
+  const page = await loadPageOrFetch(
+    url.toString(),
+    { scrollProfile: "product" },
+    session,
+    (reason) =>
+      progress({ phase: "loading-product", message: `Browser blocked (${reason}); retrying with direct fetch.`, url: url.toString() }),
+  );
   progress({ phase: "loaded-product", message: "Product page loaded.", url: page.finalUrl });
   const meta = extractMetadata(page.html, page.finalUrl);
   return processProductPage(inputUrl, hostname, page, meta, progress);

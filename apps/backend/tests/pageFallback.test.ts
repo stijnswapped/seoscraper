@@ -1,0 +1,68 @@
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { fetchPageDirect, loadPageOrFetch } from "../src/services/pageLoader.js";
+import { CheckError } from "../src/types/productCheck.js";
+
+function htmlResponse(html: string, status = 200, server = "nginx"): Response {
+  const res = new Response(html, { status, headers: { "content-type": "text/html", server } });
+  return res;
+}
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe("fetchPageDirect", () => {
+  it("returns HTML + <title> for a normal page", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      const r = htmlResponse("<html><head><title> Elegante Kanten Jurk - Aocadia </title></head><body>x</body></html>");
+      Object.defineProperty(r, "url", { value: "https://shop.example/products/x" });
+      return r;
+    }));
+    const page = await fetchPageDirect("https://shop.example/products/x");
+    expect(page.title).toBe("Elegante Kanten Jurk - Aocadia");
+    expect(page.html).toContain("<title>");
+  });
+
+  it("throws PAGE_LOAD_FAILED on a Cloudflare challenge body", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      const r = htmlResponse("<html><head><title>Just a moment...</title></head></html>", 200, "cloudflare");
+      Object.defineProperty(r, "url", { value: "https://shop.example/products/x" });
+      return r;
+    }));
+    await expect(fetchPageDirect("https://shop.example/products/x")).rejects.toBeInstanceOf(CheckError);
+  });
+});
+
+describe("loadPageOrFetch", () => {
+  it("falls back to direct fetch when the browser session is blocked", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      const r = htmlResponse("<html><head><title>Real Product</title></head><body>ok</body></html>");
+      Object.defineProperty(r, "url", { value: "https://shop.example/products/x" });
+      return r;
+    }));
+    const session = {
+      loadPage: vi.fn(async () => {
+        throw new CheckError("PAGE_LOAD_FAILED", "Page returned HTTP 403.");
+      }),
+    };
+    let fallbackReason = "";
+    const page = await loadPageOrFetch(
+      "https://shop.example/products/x",
+      { scrollProfile: "product" },
+      session,
+      (reason) => (fallbackReason = reason),
+    );
+    expect(session.loadPage).toHaveBeenCalledOnce();
+    expect(page.title).toBe("Real Product");
+    expect(fallbackReason).toContain("403");
+  });
+
+  it("uses the browser result when it succeeds (no fetch)", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const session = {
+      loadPage: vi.fn(async () => ({ finalUrl: "https://shop.example/products/x", html: "<html></html>", title: "Browser Title" })),
+    };
+    const page = await loadPageOrFetch("https://shop.example/products/x", { scrollProfile: "product" }, session);
+    expect(page.title).toBe("Browser Title");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
