@@ -52,6 +52,15 @@ function isExcludedAsset(url: string): boolean {
   return EXCLUDE_PATTERNS.some((re) => re.test(url));
 }
 
+/**
+ * Reject unrendered template placeholders (e.g. `<IMAGE_URL>`, `{{ img }}`,
+ * `${url}`) that leak into markup — resolving them yields bogus URLs like
+ * `/products/%3CIMAGE_URL%3E` that 404 on download.
+ */
+function isTemplatePlaceholder(raw: string): boolean {
+  return /[<>]|%3c|%3e|\{\{|\}\}|\$\{/i.test(raw);
+}
+
 // ---------------------------------------------------------------------------
 // Product-container selectors — ordered from most to least specific
 // ---------------------------------------------------------------------------
@@ -144,6 +153,7 @@ export function discoverImages(meta: ExtractedMetadata, finalUrl: string): Disco
 
   const add = (raw: string | undefined, source: string, alt?: string): void => {
     if (!raw) return;
+    if (isTemplatePlaceholder(raw)) return;
     const normalized = normalizeImageUrl(raw, finalUrl);
     if (!normalized) return;
     if (isExcludedAsset(normalized)) return;

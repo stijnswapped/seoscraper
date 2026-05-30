@@ -69,10 +69,17 @@ function pickProductTitle(
   if (ldName) return field(ldName, "jsonld:Product.name", CONFIDENCE.jsonLd);
 
   const ogTitle = clean(seo.openGraph["og:title"]);
-  if (ogTitle) return field(ogTitle, "og:title", CONFIDENCE.ogTag);
-
   const h1 = clean($("h1").first().text());
+  // The real <title> tag (not a fallback) — used to detect when og:title merely
+  // echoes the SEO page title (store/brand suffix) rather than naming the product.
+  const titleTag = seo.title.source === "title_tag" ? clean(seo.title.value) : null;
+  const ogEchoesPageTitle = Boolean(ogTitle && titleTag && ogTitle === titleTag && h1);
+
+  // og:title is usually a good product name — UNLESS it just echoes the page
+  // <title>, in which case the <h1> is the real product name.
+  if (ogTitle && !ogEchoesPageTitle) return field(ogTitle, "og:title", CONFIDENCE.ogTag);
   if (h1) return field(h1, "h1", CONFIDENCE.domSemantic);
+  if (ogTitle) return field(ogTitle, "og:title", CONFIDENCE.ogTag);
 
   // Largest "product-like" heading near the top of the document.
   let best: { text: string; len: number } | null = null;
