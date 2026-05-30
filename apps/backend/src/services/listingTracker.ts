@@ -11,7 +11,7 @@ import type {
 import { CheckError } from "../types/productCheck.js";
 import { assertDomainAllowed, validateAndNormalizeUrl } from "../utils/url.js";
 import { withBrowserSession } from "./pageLoader.js";
-import { buildRealisticHeaders, isBlockedResponse } from "./antiBlock.js";
+import { buildRealisticHeaders, isBlockedResponse, proxyFetch } from "./antiBlock.js";
 import { crawlPages, resolveMaxPages } from "./pagination.js";
 import type { ProgressReporter } from "./progressHub.js";
 import {
@@ -256,7 +256,7 @@ async function extractFetchedHtmlListingItems(
     let html: string;
     let finalUrl = pageUrl;
     try {
-      const response = await fetch(pageUrl, {
+      const response = await proxyFetch(pageUrl, {
         headers: buildRealisticHeaders(url.origin),
         redirect: "follow",
       });
@@ -355,7 +355,7 @@ async function extractShopifyListingItems(
     const endpoint = `${url.origin}${collectionPath}/products.json?limit=250&page=${page}`;
     let products: unknown;
     try {
-      const response = await fetch(endpoint, {
+      const response = await proxyFetch(endpoint, {
         headers: {
           ...buildRealisticHeaders(url.origin),
           // products.json is an XHR-style request, not a top-level navigation.

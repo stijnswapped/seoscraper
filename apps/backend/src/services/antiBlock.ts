@@ -149,26 +149,64 @@ export function isBlockedResponse(status: number, html: string, server?: string 
   );
 }
 
-let fetchProxyApplied = false;
+// Proxy health is process-wide and sticky: the first time the proxy fails we
+// stop using it and scrape direct, so a dead/misconfigured proxy degrades
+// gracefully instead of turning every request into a total failure.
+let proxyHealthy = true;
+let warnedProxyFailure = false;
+
+/** Whether the proxy should still be attempted (false after a proxy failure). */
+export function isProxyHealthy(): boolean {
+  return proxyHealthy;
+}
+
+/** Mark the proxy as failed so all subsequent requests skip it and go direct. */
+export function markProxyUnhealthy(context: string, detail?: string): void {
+  if (proxyHealthy && !warnedProxyFailure) {
+    log.warn("proxy failed; falling back to DIRECT for the rest of this process", { context, detail });
+    warnedProxyFailure = true;
+  }
+  proxyHealthy = false;
+}
+
+let cachedDispatcher: unknown | null | undefined;
+
+/** Lazily build (and cache) an undici ProxyAgent for fetch, or null if none. */
+async function getProxyDispatcher(): Promise<unknown | null> {
+  if (cachedDispatcher !== undefined) return cachedDispatcher as unknown | null;
+  const proxyUrl = getProxyUrl();
+  if (!proxyUrl) {
+    cachedDispatcher = null;
+    return null;
+  }
+  try {
+    const undici = (await import("undici")) as { ProxyAgent: new (uri: string) => unknown };
+    cachedDispatcher = new undici.ProxyAgent(proxyUrl);
+    log.info("fetch proxy configured");
+  } catch (err) {
+    log.warn("undici ProxyAgent unavailable; scraping direct", { message: (err as Error).message });
+    cachedDispatcher = null;
+  }
+  return cachedDispatcher as unknown | null;
+}
 
 /**
- * Route Node's global `fetch` through the configured proxy (via undici). Called
- * once at startup; a no-op when no proxy is set. Dynamic-imports undici so the
- * absence of the proxy feature never breaks the app.
+ * `fetch` that routes through the proxy when one is configured and healthy, and
+ * transparently retries DIRECT if the proxy connection/auth fails. This is the
+ * fetch counterpart to the browser proxy in pageLoader.
  */
-export async function applyGlobalFetchProxy(): Promise<void> {
-  if (fetchProxyApplied) return;
-  const proxyUrl = getProxyUrl();
-  if (!proxyUrl) return;
+export async function proxyFetch(input: string, init?: RequestInit): Promise<Response> {
+  const dispatcher = proxyHealthy ? await getProxyDispatcher() : null;
+  if (!dispatcher) return fetch(input, init);
   try {
-    const undici = (await import("undici")) as {
-      ProxyAgent: new (uri: string) => unknown;
-      setGlobalDispatcher: (d: unknown) => void;
-    };
-    undici.setGlobalDispatcher(new undici.ProxyAgent(proxyUrl));
-    fetchProxyApplied = true;
-    log.info("global fetch proxy enabled");
+    const res = await fetch(input, { ...init, dispatcher } as RequestInit);
+    if (res.status === 407) {
+      markProxyUnhealthy("proxyFetch", "HTTP 407 proxy authentication required");
+      return fetch(input, init);
+    }
+    return res;
   } catch (err) {
-    log.warn("could not enable fetch proxy (undici unavailable)", { message: (err as Error).message });
+    markProxyUnhealthy("proxyFetch", (err as Error).message);
+    return fetch(input, init);
   }
 }

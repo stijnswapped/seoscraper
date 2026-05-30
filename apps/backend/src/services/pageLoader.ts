@@ -3,7 +3,10 @@ import { sitesConfig } from "../../../../config/sites.config.js";
 import { CheckError } from "../types/productCheck.js";
 import { createLogger } from "../utils/logger.js";
 import { Semaphore } from "../utils/semaphore.js";
-import { STEALTH_INIT_SCRIPT, getProxyConfig, isBlockedResponse } from "./antiBlock.js";
+import { STEALTH_INIT_SCRIPT, getProxyConfig, isBlockedResponse, isProxyHealthy, markProxyUnhealthy } from "./antiBlock.js";
+
+/** Chromium navigation errors that indicate the proxy (not the site) is at fault. */
+const PROXY_ERROR_RE = /ERR_PROXY|ERR_TUNNEL|PROXY_CONNECTION|ERR_NO_SUPPORTED_PROXIES|ECONNREFUSED.*proxy/i;
 
 const log = createLogger("pageLoader");
 
@@ -22,7 +25,8 @@ const browserSlots = new Semaphore(sitesConfig.browser.maxConcurrency);
  */
 async function launchBrowserWithRetry(): Promise<Browser> {
   const { launchTimeoutMs } = sitesConfig.browser;
-  const proxy = getProxyConfig();
+  // Only attach the proxy while it's healthy; once it fails we launch direct.
+  const proxy = isProxyHealthy() ? getProxyConfig() : null;
   const maxAttempts = 3;
   let lastErr: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -133,6 +137,11 @@ export async function withBrowserSession<T>(
           return { finalUrl, html, title };
         } catch (err) {
           if (err instanceof CheckError) throw err;
+          // A proxy connection failure shouldn't doom every later request — trip
+          // the health flag so subsequent sessions launch direct.
+          if (PROXY_ERROR_RE.test((err as Error).message)) {
+            markProxyUnhealthy("browser navigation", (err as Error).message);
+          }
           log.error("page load failed", { url, message: (err as Error).message });
           throw new CheckError("PAGE_LOAD_FAILED", `Failed to load page: ${(err as Error).message}`);
         } finally {

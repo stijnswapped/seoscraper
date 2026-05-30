@@ -2,7 +2,6 @@ import "./env.js";
 import { buildServer } from "./server.js";
 import { runMigrations } from "./db/migrate.js";
 import { getDatabaseUrl } from "./db/postgres.js";
-import { applyGlobalFetchProxy } from "./services/antiBlock.js";
 import { createLogger } from "./utils/logger.js";
 
 const log = createLogger("server");
@@ -23,10 +22,6 @@ process.on("uncaughtException", (err) => {
 });
 
 async function main(): Promise<void> {
-  // Route outbound fetch() through the proxy (if SCRAPE_PROXY_URL is set) before
-  // any scraping happens — residential proxies are the reliable Cloudflare bypass.
-  await applyGlobalFetchProxy();
-
   const app = await buildServer();
   await app.listen({ port: PORT, host: HOST });
   log.info(`listening on http://${HOST}:${PORT}`);
