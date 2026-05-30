@@ -178,22 +178,36 @@ export async function loadRenderedPage(url: string): Promise<LoadedPage> {
  * tags (<title>, og:*, JSON-LD), which is all the metadata extractor needs.
  */
 export async function fetchPageDirect(url: string): Promise<LoadedPage> {
-  let response: Response;
-  try {
-    response = await proxyFetch(url, { headers: buildRealisticHeaders(new URL(url).origin), redirect: "follow" });
-  } catch (err) {
-    throw new CheckError("PAGE_LOAD_FAILED", `Direct fetch failed: ${(err as Error).message}`);
+  const headers = buildRealisticHeaders(new URL(url).origin);
+
+  // Read a response into a LoadedPage, or null if it was an error/block page.
+  const toPage = async (res: Response): Promise<LoadedPage | null> => {
+    if (!res.ok) return null;
+    const html = await res.text();
+    if (isBlockedResponse(res.status, html, res.headers.get("server"))) return null;
+    return { finalUrl: res.url || url, html, title: extractHtmlTitle(html) };
+  };
+
+  // Try the proxy first (best against Cloudflare), then plain direct — some
+  // stores block/mis-route the proxy's IP while serving a normal request fine.
+  let lastDetail = "";
+  for (const [label, attempt] of [
+    ["proxy", () => proxyFetch(url, { headers, redirect: "follow" })],
+    ["direct", () => fetch(url, { headers, redirect: "follow" })],
+  ] as const) {
+    try {
+      const res = await attempt();
+      const page = await toPage(res);
+      if (page) {
+        log.info("loaded via direct fetch fallback", { inputUrl: url, finalUrl: page.finalUrl, via: label, htmlBytes: page.html.length });
+        return page;
+      }
+      lastDetail = `${label} HTTP ${res.status}`;
+    } catch (err) {
+      lastDetail = `${label}: ${(err as Error).message}`;
+    }
   }
-  const finalUrl = response.url || url;
-  if (!response.ok) {
-    throw new CheckError("PAGE_LOAD_FAILED", `Direct fetch returned HTTP ${response.status}.`);
-  }
-  const html = await response.text();
-  if (isBlockedResponse(response.status, html, response.headers.get("server"))) {
-    throw new CheckError("PAGE_LOAD_FAILED", "Blocked by bot protection (direct fetch).");
-  }
-  log.info("loaded via direct fetch fallback", { inputUrl: url, finalUrl, htmlBytes: html.length });
-  return { finalUrl, html, title: extractHtmlTitle(html) };
+  throw new CheckError("PAGE_LOAD_FAILED", `Direct fetch failed or blocked (${lastDetail}).`);
 }
 
 /**
