@@ -149,24 +149,29 @@ export function isBlockedResponse(status: number, html: string, server?: string 
   );
 }
 
-// Proxy health is process-wide and sticky: the first time the proxy fails we
-// stop using it and scrape direct, so a dead/misconfigured proxy degrades
-// gracefully instead of turning every request into a total failure.
-let proxyHealthy = true;
-let warnedProxyFailure = false;
+// When the proxy fails we skip it and scrape direct for a cooldown window, then
+// retry it — so a dead/misconfigured proxy degrades gracefully, but a transient
+// blip (or a fix on the proxy side) doesn't disable the proxy for the whole
+// process lifetime.
+const PROXY_RETRY_COOLDOWN_MS =
+  Number(process.env.PROXY_RETRY_COOLDOWN_MS) > 0 ? Number(process.env.PROXY_RETRY_COOLDOWN_MS) : 5 * 60_000;
+let proxyDisabledUntil = 0;
 
-/** Whether the proxy should still be attempted (false after a proxy failure). */
+/** Whether the proxy should be attempted (false during the post-failure cooldown). */
 export function isProxyHealthy(): boolean {
-  return proxyHealthy;
+  return Date.now() >= proxyDisabledUntil;
 }
 
-/** Mark the proxy as failed so all subsequent requests skip it and go direct. */
+/** Skip the proxy (go direct) for the cooldown window, then it auto-retries. */
 export function markProxyUnhealthy(context: string, detail?: string): void {
-  if (proxyHealthy && !warnedProxyFailure) {
-    log.warn("proxy failed; falling back to DIRECT for the rest of this process", { context, detail });
-    warnedProxyFailure = true;
+  const wasHealthy = isProxyHealthy();
+  proxyDisabledUntil = Date.now() + PROXY_RETRY_COOLDOWN_MS;
+  if (wasHealthy) {
+    log.warn(`proxy failed; using DIRECT and retrying proxy in ${Math.round(PROXY_RETRY_COOLDOWN_MS / 1000)}s`, {
+      context,
+      detail,
+    });
   }
-  proxyHealthy = false;
 }
 
 let cachedDispatcher: unknown | null | undefined;
@@ -196,7 +201,7 @@ async function getProxyDispatcher(): Promise<unknown | null> {
  * fetch counterpart to the browser proxy in pageLoader.
  */
 export async function proxyFetch(input: string, init?: RequestInit): Promise<Response> {
-  const dispatcher = proxyHealthy ? await getProxyDispatcher() : null;
+  const dispatcher = isProxyHealthy() ? await getProxyDispatcher() : null;
   if (!dispatcher) return fetch(input, init);
   try {
     const res = await fetch(input, { ...init, dispatcher } as RequestInit);
