@@ -195,23 +195,38 @@ async function getProxyDispatcher(): Promise<unknown | null> {
   return cachedDispatcher as unknown | null;
 }
 
+const PROXY_FETCH_TIMEOUT_MS =
+  Number(process.env.PROXY_FETCH_TIMEOUT_MS) > 0 ? Number(process.env.PROXY_FETCH_TIMEOUT_MS) : 25_000;
+
+/** fetch() with a hard timeout so a hanging connection can't stall a request forever. */
+async function fetchWithTimeout(input: string, init: RequestInit | undefined, timeoutMs: number): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: ctrl.signal } as RequestInit);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * `fetch` that routes through the proxy when one is configured and healthy, and
- * transparently retries DIRECT if the proxy connection/auth fails. This is the
- * fetch counterpart to the browser proxy in pageLoader.
+ * transparently retries DIRECT if the proxy connection/auth fails OR times out.
+ * Both attempts are time-boxed so a slow/hanging proxy can never stall the
+ * request indefinitely (this is what caused tracking to hang).
  */
 export async function proxyFetch(input: string, init?: RequestInit): Promise<Response> {
   const dispatcher = isProxyHealthy() ? await getProxyDispatcher() : null;
-  if (!dispatcher) return fetch(input, init);
+  if (!dispatcher) return fetchWithTimeout(input, init, PROXY_FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(input, { ...init, dispatcher } as RequestInit);
+    const res = await fetchWithTimeout(input, { ...init, dispatcher } as RequestInit, PROXY_FETCH_TIMEOUT_MS);
     if (res.status === 407) {
       markProxyUnhealthy("proxyFetch", "HTTP 407 proxy authentication required");
-      return fetch(input, init);
+      return fetchWithTimeout(input, init, PROXY_FETCH_TIMEOUT_MS);
     }
     return res;
   } catch (err) {
     markProxyUnhealthy("proxyFetch", (err as Error).message);
-    return fetch(input, init);
+    return fetchWithTimeout(input, init, PROXY_FETCH_TIMEOUT_MS);
   }
 }
