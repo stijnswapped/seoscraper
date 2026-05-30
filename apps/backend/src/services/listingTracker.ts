@@ -1,4 +1,4 @@
-import type { CheerioAPI } from "cheerio";
+import { load, type CheerioAPI } from "cheerio";
 import type { Element } from "domhandler";
 import { sitesConfig } from "../../../../config/sites.config.js";
 import type {
@@ -11,6 +11,7 @@ import type {
 import { CheckError } from "../types/productCheck.js";
 import { assertDomainAllowed, validateAndNormalizeUrl } from "../utils/url.js";
 import { withBrowserSession } from "./pageLoader.js";
+import { buildRealisticHeaders, isBlockedResponse } from "./antiBlock.js";
 import { crawlPages, resolveMaxPages } from "./pagination.js";
 import type { ProgressReporter } from "./progressHub.js";
 import {
@@ -105,7 +106,22 @@ function normalizeMaxProducts(value: number): number {
   return Math.max(1, Math.min(Math.floor(value), 250));
 }
 
-async function extractListingItems(
+const ORDER_UNRELIABLE_WARNING =
+  "Best-selling order could not be preserved: Shopify's products.json feed is unsorted. " +
+  "Ranks reflect the store's default product order, not best-selling.";
+
+/**
+ * Resolve the ranking items for a listing, honoring the requested sort order as
+ * far as possible. Tiers run lazily (stop at the first that yields products):
+ *
+ *   1. plain-fetch HTML  — cheap, no Chromium, honors sort_by on server-rendered grids
+ *   2. browser HTML      — for JS-rendered themes the plain fetch can't read
+ *   3. products.json     — last resort; CANNOT honor sort_by (feed is unsorted)
+ *
+ * Running tiers lazily also slashes how often we launch a browser, which is the
+ * main driver of the container's memory crashes.
+ */
+export async function extractListingItems(
   url: URL,
   strategy: ListingSourceStrategy,
   maxProducts: number,
@@ -113,44 +129,78 @@ async function extractListingItems(
   progress?: ProgressReporter,
 ): Promise<ExtractionResult> {
   const warnings: string[] = [];
-  const htmlItems = strategy === "shopify_json" ? [] : await extractHtmlListingItems(url, maxProducts, maxPages, progress, warnings);
-  const shopifyItems = strategy === "html" ? [] : await extractShopifyListingItems(url, maxProducts, maxPages, progress, warnings);
+  const hasSortBy = url.searchParams.has("sort_by");
 
-  if (strategy === "html") {
-    return { sourceUsed: "html", items: htmlItems, warnings, rawMetadata: { htmlCount: htmlItems.length } };
-  }
+  const fetchHtml = () => extractFetchedHtmlListingItems(url, maxProducts, maxPages, progress, warnings);
+  const browserHtml = () => extractHtmlListingItems(url, maxProducts, maxPages, progress, warnings);
+  const shopifyJson = () => extractShopifyListingItems(url, maxProducts, maxPages, progress, warnings);
 
   if (strategy === "shopify_json") {
-    return { sourceUsed: "shopify_json", items: shopifyItems, warnings, rawMetadata: { shopifyCount: shopifyItems.length } };
+    const items = await shopifyJson();
+    if (hasSortBy && items.length > 0) warnings.push(ORDER_UNRELIABLE_WARNING);
+    return {
+      sourceUsed: "shopify_json",
+      items,
+      warnings,
+      rawMetadata: { shopifyCount: items.length, orderReliable: !hasSortBy },
+    };
+  }
+
+  if (strategy === "html") {
+    let items = await fetchHtml();
+    let tier = "fetched-html";
+    if (items.length === 0) {
+      items = await browserHtml();
+      tier = "browser-html";
+    }
+    return { sourceUsed: "html", items, warnings, rawMetadata: { htmlCount: items.length, tier, orderReliable: true } };
   }
 
   if (strategy === "both") {
-    const merged = mergeListingItems(htmlItems, shopifyItems, maxProducts);
+    let htmlItems = await fetchHtml();
+    if (htmlItems.length === 0) htmlItems = await browserHtml();
+    const shopifyItems = await shopifyJson();
+    const orderReliable = htmlItems.length > 0 || !hasSortBy;
+    if (hasSortBy && htmlItems.length === 0 && shopifyItems.length > 0) warnings.push(ORDER_UNRELIABLE_WARNING);
     return {
       sourceUsed: htmlItems.length > 0 && shopifyItems.length > 0 ? "both" : htmlItems.length > 0 ? "html" : "shopify_json",
-      items: merged,
-      warnings,
-      rawMetadata: { htmlCount: htmlItems.length, shopifyCount: shopifyItems.length },
-    };
-  }
-
-  if (htmlItems.length > 0) {
-    return {
-      sourceUsed: shopifyItems.length > 0 ? "both" : "html",
       items: mergeListingItems(htmlItems, shopifyItems, maxProducts),
       warnings,
-      rawMetadata: { htmlCount: htmlItems.length, shopifyCount: shopifyItems.length },
+      rawMetadata: { htmlCount: htmlItems.length, shopifyCount: shopifyItems.length, orderReliable },
     };
   }
 
+  // auto: plain-fetch HTML -> browser HTML -> products.json
+  const fetchedItems = await fetchHtml();
+  if (fetchedItems.length > 0) {
+    return {
+      sourceUsed: "html",
+      items: fetchedItems,
+      warnings,
+      rawMetadata: { htmlCount: fetchedItems.length, tier: "fetched-html", orderReliable: true },
+    };
+  }
+
+  const browserItems = await browserHtml();
+  if (browserItems.length > 0) {
+    return {
+      sourceUsed: "html",
+      items: browserItems,
+      warnings,
+      rawMetadata: { htmlCount: browserItems.length, tier: "browser-html", orderReliable: true },
+    };
+  }
+
+  const shopifyItems = await shopifyJson();
   if (shopifyItems.length > 0) {
     warnings.push("Rendered HTML did not expose product links; used Shopify products JSON fallback.");
+    if (hasSortBy) warnings.push(ORDER_UNRELIABLE_WARNING);
   }
   return {
     sourceUsed: "shopify_json",
     items: shopifyItems,
     warnings,
-    rawMetadata: { htmlCount: htmlItems.length, shopifyCount: shopifyItems.length },
+    rawMetadata: { htmlCount: 0, shopifyCount: shopifyItems.length, tier: "shopify-json", orderReliable: !hasSortBy },
   };
 }
 
@@ -174,28 +224,7 @@ async function extractHtmlListingItems(
           label: "Scanning best-sellers",
           shouldStop: () => byKey.size >= maxProducts,
         },
-        ({ $, finalUrl }) => {
-          $("a[href]").each((_, el) => {
-            if (byKey.size >= maxProducts) return;
-            const href = $(el).attr("href");
-            if (!href) return;
-            const productUrl = normalizeProductUrl(href, finalUrl);
-            if (!productUrl) return;
-            const product = productIdentity(productUrl);
-            if (byKey.has(product.productKey)) return;
-            const title = cleanText($(el).text()) ?? cleanText($(el).attr("aria-label"));
-            const imageUrl = findNearestImageUrl($, el, finalUrl);
-            byKey.set(product.productKey, {
-              rank: byKey.size + 1,
-              productKey: product.productKey,
-              url: productUrl,
-              ...(product.handle ? { handle: product.handle } : {}),
-              ...(title ? { title } : {}),
-              ...(imageUrl ? { imageUrl } : {}),
-              source: "html",
-            });
-          });
-        },
+        ({ $, finalUrl }) => collectProductLinks($, finalUrl, byKey, maxProducts),
       );
     });
 
@@ -204,6 +233,109 @@ async function extractHtmlListingItems(
     warnings.push(`HTML listing extraction failed: ${(err as Error).message}`);
     return [];
   }
+}
+
+/**
+ * Like {@link extractHtmlListingItems} but with a plain `fetch()` instead of a
+ * headless browser. The server-rendered Shopify collection page already lists
+ * products in the requested `sort_by` order (e.g. best-selling), so parsing the
+ * HTML in DOM order preserves ranks — without launching Chromium (no crash risk)
+ * and often slipping past bot checks that block headless browsers.
+ */
+async function extractFetchedHtmlListingItems(
+  url: URL,
+  maxProducts: number,
+  maxPages: number,
+  progress: ProgressReporter | undefined,
+  warnings: string[],
+): Promise<ListingRankItem[]> {
+  const byKey = new Map<string, ListingRankItem>();
+
+  for (let page = 1; page <= maxPages && byKey.size < maxProducts; page++) {
+    const pageUrl = buildPaginatedUrl(url, page);
+    let html: string;
+    let finalUrl = pageUrl;
+    try {
+      const response = await fetch(pageUrl, {
+        headers: buildRealisticHeaders(url.origin),
+        redirect: "follow",
+      });
+      finalUrl = response.url || pageUrl;
+      if (!response.ok) {
+        if (page === 1) {
+          warnings.push(
+            isBlockedResponse(response.status, "", response.headers.get("server"))
+              ? `Fetched HTML blocked by bot protection (HTTP ${response.status}).`
+              : `Fetched HTML returned HTTP ${response.status}.`,
+          );
+        }
+        break;
+      }
+      if (!sameOrigin(pageUrl, finalUrl)) {
+        if (page === 1) warnings.push("Fetched HTML redirected to another origin and was ignored.");
+        break;
+      }
+      html = await response.text();
+      if (isBlockedResponse(response.status, html, response.headers.get("server"))) {
+        if (page === 1) warnings.push("Fetched HTML returned a Cloudflare challenge; escalating.");
+        break;
+      }
+    } catch (err) {
+      if (page === 1) warnings.push(`Fetched HTML extraction failed: ${(err as Error).message}`);
+      break;
+    }
+
+    const $ = load(html);
+    const before = byKey.size;
+    collectProductLinks($, finalUrl, byKey, maxProducts);
+    if (byKey.size === before) break; // no new products → end of pagination
+
+    progress?.({
+      phase: "scanning-pages",
+      message: `Best-sellers (fetched HTML) — page ${page} · ${byKey.size} products`,
+      current: page,
+      total: maxPages,
+    });
+  }
+
+  return [...byKey.values()].map((item, index) => ({ ...item, rank: index + 1 }));
+}
+
+/** Walk product anchors in DOM order, appending newly-seen products to `byKey`. */
+function collectProductLinks(
+  $: CheerioAPI,
+  finalUrl: string,
+  byKey: Map<string, ListingRankItem>,
+  maxProducts: number,
+): void {
+  $("a[href]").each((_, el) => {
+    if (byKey.size >= maxProducts) return;
+    const href = $(el).attr("href");
+    if (!href) return;
+    const productUrl = normalizeProductUrl(href, finalUrl);
+    if (!productUrl) return;
+    const product = productIdentity(productUrl);
+    if (byKey.has(product.productKey)) return;
+    const title = cleanText($(el).text()) ?? cleanText($(el).attr("aria-label"));
+    const imageUrl = findNearestImageUrl($, el, finalUrl);
+    byKey.set(product.productKey, {
+      rank: byKey.size + 1,
+      productKey: product.productKey,
+      url: productUrl,
+      ...(product.handle ? { handle: product.handle } : {}),
+      ...(title ? { title } : {}),
+      ...(imageUrl ? { imageUrl } : {}),
+      source: "html",
+    });
+  });
+}
+
+/** Append/replace `?page=N` while preserving existing query params (e.g. sort_by). */
+function buildPaginatedUrl(url: URL, page: number): string {
+  const next = new URL(url.toString());
+  if (page <= 1) next.searchParams.delete("page");
+  else next.searchParams.set("page", String(page));
+  return next.toString();
 }
 
 async function extractShopifyListingItems(
@@ -225,9 +357,11 @@ async function extractShopifyListingItems(
     try {
       const response = await fetch(endpoint, {
         headers: {
+          ...buildRealisticHeaders(url.origin),
+          // products.json is an XHR-style request, not a top-level navigation.
           accept: "application/json,text/plain,*/*;q=0.8",
-          "accept-language": "en-US,en;q=0.9",
-          "user-agent": sitesConfig.browser.userAgent,
+          "sec-fetch-dest": "empty",
+          "sec-fetch-mode": "cors",
         },
         redirect: "follow",
       });

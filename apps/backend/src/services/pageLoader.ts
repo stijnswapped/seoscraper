@@ -2,8 +2,56 @@ import { chromium, type Browser, type Page } from "playwright";
 import { sitesConfig } from "../../../../config/sites.config.js";
 import { CheckError } from "../types/productCheck.js";
 import { createLogger } from "../utils/logger.js";
+import { Semaphore } from "../utils/semaphore.js";
+import { STEALTH_INIT_SCRIPT, getProxyConfig, isBlockedResponse } from "./antiBlock.js";
 
 const log = createLogger("pageLoader");
+
+/**
+ * Caps concurrent Chromium processes across ALL in-flight requests. Without
+ * this, N simultaneous requests each launch their own browser and OOM-kill the
+ * container (the SIGTRAP-during-launch crash). Tune via BROWSER_MAX_CONCURRENCY.
+ */
+const browserSlots = new Semaphore(sitesConfig.browser.maxConcurrency);
+
+/**
+ * Launch Chromium with an explicit timeout and a couple of retries. The
+ * chrome-headless-shell process occasionally dies mid-launch under memory
+ * pressure (exitCode=null, signal=SIGTRAP); a transient failure shouldn't sink
+ * the whole check.
+ */
+async function launchBrowserWithRetry(): Promise<Browser> {
+  const { launchTimeoutMs } = sitesConfig.browser;
+  const proxy = getProxyConfig();
+  const maxAttempts = 3;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await chromium.launch({
+        headless: true,
+        timeout: launchTimeoutMs,
+        // Route through a residential/rotating proxy when configured — the only
+        // reliable defense against Cloudflare IP-based blocking.
+        ...(proxy ? { proxy } : {}),
+        args: [
+          "--disable-blink-features=AutomationControlled",
+          // Container-friendly flags (Railway): avoid /dev/shm crashes + GPU overhead.
+          "--no-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-gpu",
+        ],
+      });
+    } catch (err) {
+      lastErr = err;
+      log.warn("browser launch failed", { attempt, maxAttempts, message: (err as Error).message });
+      if (attempt < maxAttempts) await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+    }
+  }
+  throw new CheckError(
+    "PAGE_LOAD_FAILED",
+    `Failed to launch browser after ${maxAttempts} attempts: ${(lastErr as Error)?.message ?? "unknown error"}`,
+  );
+}
 
 export interface LoadedPage {
   finalUrl: string;
@@ -31,17 +79,11 @@ export async function withBrowserSession<T>(
   const { browser } = sitesConfig;
   let browserInstance: Browser | null = null;
 
+  // Hold a global slot for the entire session so we never exceed the configured
+  // number of live Chromium processes, no matter how many requests arrive.
+  await browserSlots.acquire();
   try {
-    browserInstance = await chromium.launch({
-      headless: true,
-      args: [
-        "--disable-blink-features=AutomationControlled",
-        // Container-friendly flags (Railway): avoid /dev/shm crashes + GPU overhead.
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-      ],
-    });
+    browserInstance = await launchBrowserWithRetry();
     const context = await browserInstance.newContext({
       userAgent: browser.userAgent,
       viewport: browser.viewport,
@@ -50,6 +92,8 @@ export async function withBrowserSession<T>(
       extraHTTPHeaders: browser.extraHTTPHeaders,
       ignoreHTTPSErrors: false,
     });
+    // Hide the headless/automation tells before any site script runs.
+    await context.addInitScript(STEALTH_INIT_SCRIPT);
 
     const session: BrowserSession = {
       async loadPage(url: string, opts?: LoadPageOptions): Promise<LoadedPage> {
@@ -67,6 +111,13 @@ export async function withBrowserSession<T>(
 
           if (response && response.status() >= 400) {
             throw new CheckError("PAGE_LOAD_FAILED", `Page returned HTTP ${response.status()}.`);
+          }
+
+          // Detect a Cloudflare (or similar) challenge page so callers can fall
+          // back instead of parsing the interstitial as if it were the product.
+          const earlyHtml = await page.content();
+          if (isBlockedResponse(response?.status() ?? 200, earlyHtml, response?.headers()["server"])) {
+            throw new CheckError("PAGE_LOAD_FAILED", "Blocked by bot protection (Cloudflare challenge).");
           }
 
           const scrollTimeout =
@@ -93,6 +144,7 @@ export async function withBrowserSession<T>(
     return await fn(session);
   } finally {
     if (browserInstance) await browserInstance.close().catch(() => {});
+    browserSlots.release();
   }
 }
 

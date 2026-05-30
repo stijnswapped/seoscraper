@@ -61,6 +61,14 @@ export interface SitesConfig {
     userAgent: string;
     extraHTTPHeaders: Record<string, string>;
     viewport: { width: number; height: number };
+    /**
+     * Max headless Chromium processes alive at once across ALL in-flight
+     * requests. Keep low on small containers — unbounded concurrent launches
+     * OOM-kill the box (SIGTRAP during launch).
+     */
+    maxConcurrency: number;
+    /** Per-attempt timeout for chromium.launch() before we retry it. */
+    launchTimeoutMs: number;
   };
 
   images: {
@@ -169,6 +177,8 @@ export const sitesConfig: SitesConfig = {
       "Upgrade-Insecure-Requests": "1",
     },
     viewport: { width: 1366, height: 1000 },
+    maxConcurrency: envInt("BROWSER_MAX_CONCURRENCY", 1),
+    launchTimeoutMs: envInt("BROWSER_LAUNCH_TIMEOUT_MS", 45000),
   },
 
   // --- Image filtering & selection -----------------------------------------
@@ -187,7 +197,7 @@ export const sitesConfig: SitesConfig = {
     maxAspectRatio: 3.0,
     edgeSimilarityThreshold: 0.9,
     maxProcessingFailureRatio: 0.5,
-    downloadConcurrency: envInt("IMAGE_CONCURRENCY", 6),
+    downloadConcurrency: envInt("IMAGE_CONCURRENCY", 4),
   },
 
   // --- Output ---------------------------------------------------------------
@@ -212,6 +222,6 @@ export const sitesConfig: SitesConfig = {
   },
 
   enrichment: {
-    concurrency: envInt("ENRICH_CONCURRENCY", 3),
+    concurrency: envInt("ENRICH_CONCURRENCY", 2),
   },
 };
