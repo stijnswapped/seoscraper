@@ -36,31 +36,35 @@ export interface ProxyConfig {
 export function getProxyConfig(): ProxyConfig | null {
   const raw = (process.env.SCRAPE_PROXY_URL ?? process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY ?? "").trim();
   if (!raw) return null;
-  // Tolerate a scheme-less value like "user:pass@host:port" — without an explicit
-  // "scheme://", new URL() misreads the username as the protocol and drops the host.
-  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`;
-  try {
-    const url = new URL(withScheme);
-    const username = url.username || process.env.SCRAPE_PROXY_USERNAME?.trim() || undefined;
-    const password = url.password || process.env.SCRAPE_PROXY_PASSWORD?.trim() || undefined;
-    // Playwright wants the bare scheme://host:port in `server`, creds separately.
-    const server = `${url.protocol}//${url.host}`;
-    return { server, ...(username ? { username } : {}), ...(password ? { password } : {}) };
-  } catch {
+  // Parse manually instead of new URL(): proxy passwords often contain special
+  // chars (@ / # : etc.) that break URL parsing. Strip the scheme, split the
+  // userinfo from host:port on the LAST '@', then user/pass on the FIRST ':'.
+  const noScheme = raw.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
+  const at = noScheme.lastIndexOf("@");
+  const userinfo = at >= 0 ? noScheme.slice(0, at) : "";
+  const hostport = (at >= 0 ? noScheme.slice(at + 1) : noScheme).trim();
+  if (!hostport) {
     log.warn("invalid SCRAPE_PROXY_URL; ignoring", { raw });
     return null;
   }
+  let username = process.env.SCRAPE_PROXY_USERNAME?.trim() || undefined;
+  let password = process.env.SCRAPE_PROXY_PASSWORD?.trim() || undefined;
+  if (userinfo) {
+    const colon = userinfo.indexOf(":");
+    username = (colon >= 0 ? userinfo.slice(0, colon) : userinfo) || username;
+    if (colon >= 0) password = userinfo.slice(colon + 1) || password;
+  }
+  return { server: `http://${hostport}`, ...(username ? { username } : {}), ...(password ? { password } : {}) };
 }
 
-/** Full proxy URL (creds inline) for undici/fetch, or null when unset. */
+/** Full proxy URL (creds inline, percent-encoded) for undici/fetch, or null when unset. */
 export function getProxyUrl(): string | null {
   const cfg = getProxyConfig();
   if (!cfg) return null;
   if (!cfg.username) return cfg.server;
-  const u = new URL(cfg.server);
-  u.username = cfg.username;
-  if (cfg.password) u.password = cfg.password;
-  return u.toString();
+  // Encode creds so special characters survive into the proxy URI (undici decodes them).
+  const auth = `${encodeURIComponent(cfg.username)}${cfg.password ? `:${encodeURIComponent(cfg.password)}` : ""}`;
+  return cfg.server.replace(/^http:\/\//, `http://${auth}@`);
 }
 
 /**
@@ -149,17 +153,24 @@ export function isBlockedResponse(status: number, html: string, server?: string 
   );
 }
 
-// When the proxy fails we skip it and scrape direct for a cooldown window, then
-// retry it — so a dead/misconfigured proxy degrades gracefully, but a transient
-// blip (or a fix on the proxy side) doesn't disable the proxy for the whole
-// process lifetime.
+// Rotating proxies (residential pools) hand out a different exit IP per request,
+// so a single failure/blocked exit must NOT disable the whole pool — we just
+// retry through the gateway and get a fresh IP. Set PROXY_ROTATING=true for these.
+const PROXY_ROTATING = (process.env.PROXY_ROTATING ?? "").trim().toLowerCase() === "true";
+const PROXY_RETRY_ATTEMPTS =
+  Number(process.env.PROXY_RETRY_ATTEMPTS) > 0 ? Number(process.env.PROXY_RETRY_ATTEMPTS) : 3;
+
+// For a single STATIC proxy, when it fails we skip it and scrape direct for a
+// cooldown window, then retry it — a dead proxy degrades gracefully, but a
+// transient blip doesn't disable the proxy for the whole process lifetime.
 const PROXY_RETRY_COOLDOWN_MS =
   Number(process.env.PROXY_RETRY_COOLDOWN_MS) > 0 ? Number(process.env.PROXY_RETRY_COOLDOWN_MS) : 5 * 60_000;
 let proxyDisabledUntil = 0;
 
 /** Whether the proxy should be attempted (false during the post-failure cooldown). */
 export function isProxyHealthy(): boolean {
-  return Date.now() >= proxyDisabledUntil;
+  // A rotating gateway is always "healthy" — we never disable it on a bad exit.
+  return PROXY_ROTATING || Date.now() >= proxyDisabledUntil;
 }
 
 /** Skip the proxy (go direct) for the cooldown window, then it auto-retries. */
@@ -218,15 +229,26 @@ async function fetchWithTimeout(input: string, init: RequestInit | undefined, ti
 export async function proxyFetch(input: string, init?: RequestInit): Promise<Response> {
   const dispatcher = isProxyHealthy() ? await getProxyDispatcher() : null;
   if (!dispatcher) return fetchWithTimeout(input, init, PROXY_FETCH_TIMEOUT_MS);
-  try {
-    const res = await fetchWithTimeout(input, { ...init, dispatcher } as RequestInit, PROXY_FETCH_TIMEOUT_MS);
-    if (res.status === 407) {
-      markProxyUnhealthy("proxyFetch", "HTTP 407 proxy authentication required");
-      return fetchWithTimeout(input, init, PROXY_FETCH_TIMEOUT_MS);
+
+  // Rotating: retry through the gateway (new exit IP each attempt) before giving
+  // up, and never trip the cooldown. Static: a single failure → direct + cooldown.
+  const attempts = PROXY_ROTATING ? PROXY_RETRY_ATTEMPTS : 1;
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetchWithTimeout(input, { ...init, dispatcher } as RequestInit, PROXY_FETCH_TIMEOUT_MS);
+      if (res.status === 407) {
+        // Auth failure won't fix itself by retrying — bail to direct.
+        if (!PROXY_ROTATING) markProxyUnhealthy("proxyFetch", "HTTP 407 proxy authentication required");
+        return fetchWithTimeout(input, init, PROXY_FETCH_TIMEOUT_MS);
+      }
+      return res;
+    } catch (err) {
+      lastErr = err;
     }
-    return res;
-  } catch (err) {
-    markProxyUnhealthy("proxyFetch", (err as Error).message);
-    return fetchWithTimeout(input, init, PROXY_FETCH_TIMEOUT_MS);
   }
+  // All proxy attempts failed.
+  if (!PROXY_ROTATING) markProxyUnhealthy("proxyFetch", (lastErr as Error)?.message);
+  else log.warn("proxy attempts exhausted; falling back to DIRECT for this request", { message: (lastErr as Error)?.message });
+  return fetchWithTimeout(input, init, PROXY_FETCH_TIMEOUT_MS);
 }

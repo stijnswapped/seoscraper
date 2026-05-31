@@ -51,7 +51,18 @@ describe("getProxyConfig / getProxyUrl", () => {
   it("parses inline credentials and splits server from auth", () => {
     process.env.SCRAPE_PROXY_URL = "http://user:pass@proxy.example:8080";
     expect(getProxyConfig()).toEqual({ server: "http://proxy.example:8080", username: "user", password: "pass" });
-    expect(getProxyUrl()).toBe("http://user:pass@proxy.example:8080/");
+    expect(getProxyUrl()).toBe("http://user:pass@proxy.example:8080");
+  });
+
+  it("handles a Smartproxy-style username and a password with special chars", () => {
+    process.env.SCRAPE_PROXY_URL = "http://smart-user_area-NL:p@ss/w0rd@gate.smartproxy.net:3120";
+    expect(getProxyConfig()).toEqual({
+      server: "http://gate.smartproxy.net:3120",
+      username: "smart-user_area-NL",
+      password: "p@ss/w0rd",
+    });
+    // creds are percent-encoded in the proxy URI so undici parses them correctly
+    expect(getProxyUrl()).toBe("http://smart-user_area-NL:p%40ss%2Fw0rd@gate.smartproxy.net:3120");
   });
 
   it("tolerates a scheme-less value (user:pass@host:port)", () => {
