@@ -43,6 +43,47 @@ export async function cleanupOldRuns(baseDir: string, maxAgeDays: number): Promi
 }
 
 /**
+ * Hard cap on the number of retained run folders: keep the newest `maxRuns` and
+ * delete the oldest beyond that. This bounds disk regardless of age — the
+ * age-based TTL can't keep up with a burst of research scrapes, but this can.
+ * Returns the number removed.
+ */
+export async function enforceMaxRuns(baseDir: string, maxRuns: number): Promise<number> {
+  if (!(maxRuns > 0)) return 0;
+  const runsDir = path.join(baseDir, "runs");
+  let entries: string[];
+  try {
+    entries = await readdir(runsDir);
+  } catch {
+    return 0;
+  }
+  if (entries.length <= maxRuns) return 0;
+
+  const withTime: Array<{ name: string; t: number }> = [];
+  for (const name of entries) {
+    try {
+      const info = await stat(path.join(runsDir, name));
+      if (info.isDirectory()) withTime.push({ name, t: info.mtimeMs });
+    } catch {
+      /* ignore */
+    }
+  }
+  withTime.sort((a, b) => a.t - b.t); // oldest first
+  const doomed = withTime.slice(0, Math.max(0, withTime.length - maxRuns));
+  let removed = 0;
+  for (const d of doomed) {
+    try {
+      await rm(path.join(runsDir, d.name), { recursive: true, force: true });
+      removed++;
+    } catch {
+      /* ignore */
+    }
+  }
+  if (removed > 0) log.info("enforced max run count", { removed, maxRuns });
+  return removed;
+}
+
+/**
  * Delete ALL research run folders under `output/runs` regardless of age. For
  * one-off recovery (e.g. the volume filled up). Returns the number removed.
  */
@@ -73,13 +114,16 @@ export async function purgeAllRuns(baseDir: string): Promise<number> {
  */
 export function startStorageCleanup(): void {
   if (timer) return;
-  const { baseDir, retentionDays, cleanupIntervalMs } = sitesConfig.output;
-  const sweep = () => {
-    void cleanupOldRuns(baseDir, retentionDays).catch((err) =>
-      log.warn("cleanup sweep failed", { message: (err as Error).message }),
-    );
+  const { baseDir, retentionDays, cleanupIntervalMs, maxRuns } = sitesConfig.output;
+  const sweep = async () => {
+    try {
+      await cleanupOldRuns(baseDir, retentionDays);
+      await enforceMaxRuns(baseDir, maxRuns);
+    } catch (err) {
+      log.warn("cleanup sweep failed", { message: (err as Error).message });
+    }
   };
-  sweep();
-  timer = setInterval(sweep, cleanupIntervalMs);
+  void sweep();
+  timer = setInterval(() => void sweep(), cleanupIntervalMs);
   timer.unref?.();
 }

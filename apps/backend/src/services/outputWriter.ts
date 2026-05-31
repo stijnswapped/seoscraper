@@ -9,6 +9,8 @@ import type {
 import { CheckError } from "../types/productCheck.js";
 import { allocateRunDir, sanitizeDomain } from "../utils/filesystem.js";
 import { createLogger } from "../utils/logger.js";
+import { sitesConfig } from "../../../../config/sites.config.js";
+import { enforceMaxRuns } from "./storageMaintenance.js";
 
 const log = createLogger("outputWriter");
 
@@ -32,6 +34,9 @@ export async function createRun(baseDir: string, hostname: string): Promise<RunP
     await mkdir(imagesDir, { recursive: true });
     await mkdir(rawDir, { recursive: true });
     log.info("run allocated", { runDir, runId });
+    // Opportunistically bound disk: keep run count under the cap even during a
+    // burst of research scrapes (fire-and-forget; the hourly sweep is the backstop).
+    void enforceMaxRuns(absBase, sitesConfig.output.maxRuns).catch(() => {});
     return { runId, runDir, imagesDir, rawDir, tempDir };
   } catch (err) {
     throw new CheckError(

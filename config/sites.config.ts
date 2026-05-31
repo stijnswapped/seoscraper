@@ -99,6 +99,8 @@ export interface SitesConfig {
     retentionDays: number;
     /** How often the background cleanup sweep runs. */
     cleanupIntervalMs: number;
+    /** Hard cap on retained run folders (oldest beyond this are deleted). */
+    maxRuns: number;
   };
 
   /** Parallelism for multi-product scraping (collections). */
@@ -210,7 +212,8 @@ export const sitesConfig: SitesConfig = {
     // Research runs (rendered HTML + images) are heavy but low-volume; auto-prune
     // them so disk stays bounded. Best-seller tracking writes nothing to disk.
     retentionDays: envInt("RUN_RETENTION_DAYS", 7),
-    cleanupIntervalMs: envInt("RUN_CLEANUP_INTERVAL_MS", 6 * 60 * 60 * 1000),
+    cleanupIntervalMs: envInt("RUN_CLEANUP_INTERVAL_MS", 60 * 60 * 1000),
+    maxRuns: envInt("RUN_MAX_COUNT", 300),
   },
 
   // --- Multi-product scraping parallelism -----------------------------------

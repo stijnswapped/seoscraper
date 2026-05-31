@@ -3,7 +3,7 @@ import { mkdir, writeFile, utimes, rm, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { cleanupOldRuns } from "../src/services/storageMaintenance.js";
+import { cleanupOldRuns, enforceMaxRuns } from "../src/services/storageMaintenance.js";
 
 const bases: string[] = [];
 
@@ -42,5 +42,29 @@ describe("cleanupOldRuns", () => {
     expect(await cleanupOldRuns(base, 0)).toBe(0); // disabled
     expect(await readdir(path.join(base, "runs"))).toEqual(["old"]);
     expect(await cleanupOldRuns(path.join(base, "does-not-exist"), 7)).toBe(0);
+  });
+});
+
+describe("enforceMaxRuns", () => {
+  it("keeps only the newest N run folders", async () => {
+    const base = path.join(tmpdir(), `seoscrape-${randomUUID()}`);
+    bases.push(base);
+    // 5 runs, increasing age: r0 newest ... r4 oldest
+    for (let i = 0; i < 5; i++) await makeRun(base, `r${i}`, i);
+
+    const removed = await enforceMaxRuns(base, 2);
+
+    expect(removed).toBe(3);
+    const left = (await readdir(path.join(base, "runs"))).sort();
+    expect(left).toEqual(["r0", "r1"]); // newest two (age 0 and 1 days)
+  });
+
+  it("is a no-op under the cap", async () => {
+    const base = path.join(tmpdir(), `seoscrape-${randomUUID()}`);
+    bases.push(base);
+    await makeRun(base, "a", 1);
+    await makeRun(base, "b", 2);
+    expect(await enforceMaxRuns(base, 10)).toBe(0);
+    expect((await readdir(path.join(base, "runs"))).sort()).toEqual(["a", "b"]);
   });
 });
