@@ -1,4 +1,4 @@
-import { readdir, stat, rm } from "node:fs/promises";
+import { readdir, stat, rm, statfs } from "node:fs/promises";
 import path from "node:path";
 import { sitesConfig } from "../../../../config/sites.config.js";
 import { createLogger } from "../utils/logger.js";
@@ -6,6 +6,30 @@ import { createLogger } from "../utils/logger.js";
 const log = createLogger("storageMaintenance");
 
 let timer: NodeJS.Timeout | null = null;
+
+/** Read-only snapshot of disk usage: run-folder count + volume free/total bytes. */
+export async function getStorageStats(
+  baseDir: string,
+): Promise<{ runs: number; freeBytes: number | null; totalBytes: number | null; usedPct: number | null }> {
+  let runs = 0;
+  try {
+    runs = (await readdir(path.join(baseDir, "runs"))).length;
+  } catch {
+    /* runs dir not created yet */
+  }
+  let freeBytes: number | null = null;
+  let totalBytes: number | null = null;
+  try {
+    const fs = await statfs(baseDir);
+    freeBytes = fs.bsize * fs.bavail;
+    totalBytes = fs.bsize * fs.blocks;
+  } catch {
+    /* statfs unavailable */
+  }
+  const usedPct =
+    totalBytes && freeBytes != null ? Math.round((1 - freeBytes / totalBytes) * 100) : null;
+  return { runs, freeBytes, totalBytes, usedPct };
+}
 
 /**
  * Delete on-disk research runs (rendered HTML + images + JSON) older than

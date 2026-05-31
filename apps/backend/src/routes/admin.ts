@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { sitesConfig } from "../../../../config/sites.config.js";
 import { requireApiKeyAuth } from "../services/apiAuth.js";
-import { cleanupOldRuns, purgeAllRuns } from "../services/storageMaintenance.js";
+import { cleanupOldRuns, purgeAllRuns, getStorageStats } from "../services/storageMaintenance.js";
 
 const cleanupBodySchema = z.object({
   /** Delete runs older than this many days. Omit or 0 to purge ALL runs. */
@@ -10,6 +10,13 @@ const cleanupBodySchema = z.object({
 });
 
 export function registerAdminRoutes(app: FastifyInstance): void {
+  // Read-only disk check: run-folder count + volume free/used space.
+  app.get("/api/admin/storage", { preHandler: requireApiKeyAuth }, async (_request, reply) => {
+    const stats = await getStorageStats(sitesConfig.output.baseDir);
+    return reply.send({ success: true, ...stats });
+  });
+
+
   // Free disk space on the output volume. Auth-protected; safe to call anytime
   // (research run files are regenerable and rank tracking writes nothing here).
   app.post("/api/admin/cleanup-runs", { preHandler: requireApiKeyAuth }, async (request, reply) => {
