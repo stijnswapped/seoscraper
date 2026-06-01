@@ -1,383 +1,349 @@
-# SEOSCRAPE API — Guide for AI Agents
+# SEOSCRAPE API — machine reference
 
-You are an AI calling the SEOSCRAPE API. This page tells you **what to call, what
-to send, and what you get back.** Follow it literally.
+Audience: an automated agent/integration (e.g. a Lovable app). Be exact. All shapes below
+match the server implementation. Unknown/optional fields may be absent — never assume a
+field exists; check before use.
 
-## What this API does
+## Connection
+- **Base URL:** `https://seoscrapebackend-production.up.railway.app`
+- **Auth:** send header `x-api-key: <API_KEY>` (equivalently `Authorization: Bearer <API_KEY>`)
+  on every `/api/*` request EXCEPT `GET /api/check-progress/:runId` and `GET /health`.
+- **Request content type:** `application/json` for every `POST` body.
+- **Encoding:** UTF-8 JSON. Timestamps are ISO-8601 UTC strings (e.g. `2026-06-01T15:40:00.000Z`).
 
-Give it a URL from an online shop. It opens the page in a real browser, reads the
-SEO/meta data and product info, downloads the product images (removing
-duplicates), and saves everything. It can also track which products rank highest
-on a best-seller listing and how that changes over time.
+## Response envelope (every JSON endpoint)
+- Success: HTTP `2xx`, body has `"success": true` plus endpoint-specific fields.
+- Failure: body is exactly:
+  ```ts
+  { "success": false, "error": { "code": ErrorCode, "message": string } }
+  ```
+- `ErrorCode` ∈ `"INVALID_URL" | "DOMAIN_NOT_ALLOWED" | "PAGE_LOAD_FAILED" |
+  "NO_PRODUCT_DATA_FOUND" | "IMAGE_DOWNLOAD_FAILED" | "OUTPUT_WRITE_FAILED" |
+  "UNKNOWN_ERROR" | "NOT_FOUND" | "UNAUTHORIZED" | "AUTH_NOT_CONFIGURED"`.
+- HTTP status mapping:
+  - `400` → `INVALID_URL`, `DOMAIN_NOT_ALLOWED` (bad input; do NOT retry unchanged).
+  - `401` → `UNAUTHORIZED` (bad/missing key; do NOT retry).
+  - `404` → `NOT_FOUND` (unknown id).
+  - `502` → `PAGE_LOAD_FAILED`, `NO_PRODUCT_DATA_FOUND`, other scrape failures (transient; retry with backoff).
+  - `500` → `UNKNOWN_ERROR` (transient; retry with backoff).
+- Retry policy: retry only `500`/`502`/network-timeout, max 2× with exponential backoff.
+  Never retry `400`/`401`/`404`.
 
-For `/api/check-product` there are two outcomes:
+## Shared types
+```ts
+ListingSourceStrategy = "auto" | "html" | "shopify_json" | "both"
+ListingSourceUsed     = "html" | "shopify_json" | "both"
+ListingRankDirection  = "up" | "down" | "same" | "new" | "missing"
 
-- a **single product result** when the URL is a product page
-- a **collection result** when the URL is a category/listing page; each discovered
-  product is scraped too and returned in `result.products`
+ListingRankItem = {
+  rank: number            // 1-based position in best-selling order
+  productKey: string      // STABLE identity. "shopify:<productId>" or "handle:<handle>". Match on this.
+  url: string             // canonical product URL
+  handle?: string         // Shopify product handle (slug)
+  title?: string          // product title (display only; may change between runs)
+  imageUrl?: string       // first/main product image URL
+  productId?: string      // Shopify numeric product id (when known)
+  source: ListingSourceUsed
+}
 
----
+ListingRankChange = {
+  productKey: string
+  url: string
+  handle?: string
+  title?: string
+  previousRank: number | null   // null when direction = "new"
+  currentRank: number | null    // null when direction = "missing"
+  delta: number | null          // previousRank - currentRank; >0 = moved up; null for new/missing
+  direction: ListingRankDirection
+  previousSnapshotId: string | null
+  currentSnapshotId: string
+}
 
-## 1. Before you call anything
-
-**Base URL:**
-```
-https://seoscrapebackend-production.up.railway.app
-```
-
-**Always send these on POST requests:**
-```
-Content-Type: application/json
-Authorization: Bearer <API_KEY>
-```
-The API key is required. Without it you get `401`. (`x-api-key: <API_KEY>` also works.)
-
-**Always check `success` in the JSON first.** Every response is one of:
-
-```json
-{ "success": true,  "result": { ... }, "fileBaseUrl": "https://…/files/runs/…", "dataUrl": "https://…/files/runs/…/data.json" }
-{ "success": false, "error":  { "code": "SOME_CODE", "message": "why it failed" } }
-```
-- If `success` is `false`, read `error.code` and stop — do not read `result`.
-- `fileBaseUrl` and `dataUrl` appear on successful scrape responses as full URLs.
-
----
-
-## 2. Pick the right endpoint
-
-| You want to… | Call |
-|---|---|
-| Check the API is alive | `GET /health` |
-| Scrape a product OR a category page | `POST /api/check-product` |
-| Track best-seller rankings | `POST /api/listings/track` |
-| Re-read a tracked listing later | `GET /api/listings/{id}/latest` or `/history` |
-| Download a saved image or file | `GET {fileBaseUrl}/{filePath}` |
-
-You never have to decide "is this a product or a category page?" — send it to
-`/api/check-product` and look at `result.kind` in the answer.
-
----
-
-## 3. `GET /health`
-
-Check the service is up. No key needed.
-
-```bash
-curl https://seoscrapebackend-production.up.railway.app/health
-```
-Returns: `{ "ok": true }`
-
----
-
-## 4. `POST /api/check-product`  ← the main one
-
-Scrape one shop URL.
-
-### What to send
-
-**Send:**
-```json
-{ "url": "https://shop.com/products/blue-dress" }
-```
-Optional fields:
-- `"runId": "<any-unique-string>"` — to receive live progress (see §6).
-- `"maxPages": <number>` — for a **collection/category** URL, how many listing pages
-  to walk (follows pagination + auto-scroll). Defaults to the server's
-  `MAX_COLLECTION_PAGES` (10), capped at the server ceiling. Ignored for a single
-  product page. Crawling also stops once `MAX_COLLECTION_PRODUCTS` is reached.
-- `"responseMode": "full" | "url"` — `"full"` returns the full JSON payload;
-  `"url"` returns only the file URLs and a small summary, so callers can fetch
-  the saved `data.json` instead of receiving a large response body.
-
-### What it does
-
-1. Validates the URL and checks the domain.
-2. Renders the page in Chromium.
-3. Extracts SEO/meta data, product data, and images.
-4. If the page is a collection/listing, it finds product URLs and scrapes those too.
-5. Writes the full result to `data.json` and the images/raw HTML to the run folder.
-6. Returns either the full JSON or just the file URLs, depending on `responseMode`.
-
-### What to expect
-
-| Page type | Result |
-|---|---|
-| Product page | `result.kind === "product"` and `result.product`, `result.images`, `result.seo` |
-| Collection page | `result.kind === "collection"` and `result.products[]` with one entry per discovered product |
-
-The saved `data.json` always contains the full final result object.
-
-**Example:**
-```bash
-curl -X POST https://seoscrapebackend-production.up.railway.app/api/check-product \
-  -H "Authorization: Bearer <API_KEY>" \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://shop.com/products/blue-dress","runId":"run-001","responseMode":"url"}'
-```
-
-**What you get back depends on `result.kind`:**
-
-### A) `result.kind === "product"` — a single product page
-
-```jsonc
-{
-  "success": true,
-  "fileBaseUrl": "https://seoscrapebackend-production.up.railway.app/files/runs/20260529t163141z-shop-com-60be737d",
-  "dataUrl": "https://seoscrapebackend-production.up.railway.app/files/runs/20260529t163141z-shop-com-60be737d/data.json",
-  "result": {
-    "kind": "product",
-    "finalUrl": "https://shop.com/products/blue-dress",  // after redirects
-    "domain": "shop.com",
-    "checkedAt": "2026-05-29T16:31:41.000Z",
-
-    // SEO/meta. Each field = { value, source, confidence (0-1), warnings[] }.
-    // "value" is null if not found. Higher confidence = more trustworthy source.
-    "seo": {
-      "title":        { "value": "Blue Dress | Shop", "source": "title_tag",       "confidence": 0.95, "warnings": [] },
-      "description":  { "value": "A blue dress…",      "source": "meta_description", "confidence": 0.9,  "warnings": [] },
-      "canonicalUrl": { "value": "https://shop.com/products/blue-dress", "source": "canonical_link", "confidence": 0.95, "warnings": [] },
-      "openGraph": { "og:title": "Blue Dress", "og:image": "https://…" },  // raw OG tags
-      "twitter":   { "twitter:card": "summary_large_image" }              // raw Twitter tags
-    },
-
-    // The product itself (prefer these over seo.* for the product name/text).
-    "product": {
-      "title":       { "value": "Blue Dress", "source": "jsonld:Product.name", "confidence": 0.95, "warnings": [] },
-      "description": { "value": "…",          "source": "jsonld:Product.description", "confidence": 0.95, "warnings": [] },
-      "structuredData": [ { "@type": "Product", "name": "…" } ]  // raw JSON-LD nodes
-    },
-
-    // Images. "downloaded" = the de-duplicated set actually saved to disk.
-    "images": {
-      "discovered": [ { "normalizedUrl": "https://…", "source": "jsonld", "alt": "front" } ],
-      "downloaded": [
-        {
-          "originalUrl": "https://cdn…/front.png",
-          "filePath": "images/001-main.png",  // path UNDER fileBaseUrl (see §7)
-          "width": 1600, "height": 1600,
-          "groupId": "g1",                     // images with same groupId = same view
-          "reason": "Distinct view (different pose/detail/crop/silhouette)."
-        }
-      ],
-      "skipped": [ { "originalUrl": "https://…", "reason": "Near-duplicate of group representative.", "similarTo": "https://…" } ],
-      "strategy": {
-        "mode": "selective",                   // or "download_all_fallback" (kept everything because dedup was unsure)
-        "reason": "Grouped 28 usable images into 24 distinct view(s).",
-        "groups": [ { "groupId": "g1", "representativeImage": "https://…", "imageCount": 2, "reason": "…" } ]
-      }
-    },
-
-    "files": { "outputDir": "…", "dataJsonPath": "…", "seoJsonPath": "…", "rawHtmlPath": "…", "rawMetadataPath": "…" },
-    "warnings": [],
-    "errors": []   // e.g. ["NO_PRODUCT_DATA_FOUND: …"] if the page had little product data
-  }
+ExtractedField<T> = {
+  value: T                // T is usually string | null
+  source: string          // provenance, e.g. "title_tag", "og:title", "jsonld:Product.name", "h1"
+  confidence: number      // 0..1
+  warnings: string[]
 }
 ```
 
-**How to use a product result:**
-- Product name → `result.product.title.value`; if `null`, use `result.seo.title.value`.
-- Product text → `result.product.description.value`; if `null`, use `result.seo.description.value`.
-- Images to show/download → for each item in `result.images.downloaded`, the full
-  URL is `BASE + fileBaseUrl + "/" + filePath`
-  → e.g. `https://seoscrapebackend-production.up.railway.app/files/runs/<id>/images/001-main.png`
-- Trust fields with higher `confidence`. `source` starting with `jsonld:` is best;
-  `dom_*` means it was guessed — check that field's `warnings`.
-- `result.errors` non-empty means extraction was weak even though the call returned `200`.
+---
 
-### B) `result.kind === "collection"` — a category / listing page
+## 1) `GET /health`
+- Auth: none.
+- Response `200`: `{ "ok": true }`.
+- Use for liveness only.
 
-The page was a list of products, so each product was scraped too.
+---
 
-```jsonc
+## 2) `POST /api/listings/track`  — best-seller rank tracking (PRIMARY)
+Scrapes a collection's best-selling order, captures rank+title+image+url per product,
+stores a snapshot, and diffs it against the previous snapshot for that listing.
+
+### Request body
+| field | type | required | default | meaning / constraints |
+|---|---|---|---|---|
+| `url` | string | **yes** | — | Collection URL. MUST include `?sort_by=best-selling` to track best-sellers. |
+| `sourceStrategy` | `ListingSourceStrategy` | no | `"both"` | Data source. Omit to get the default (best). See semantics below. |
+| `maxProducts` | integer | no | `150` | Max products to capture. Range 1–250 (values outside are clamped). |
+| `maxPages` | integer | no | `10` | Max collection pages to walk. Positive integer. |
+| `runId` | string | no | — | Correlates with `GET /api/check-progress/:runId` SSE stream. |
+| `enrich` | boolean | no | — | DEPRECATED/IGNORED. Tracking never does per-product scraping. |
+
+`sourceStrategy` semantics:
+- `"both"` / `"auto"` (recommended): best-selling **order** from server-rendered HTML
+  (the `?sort_by=best-selling` URL is preserved, no JS) + **title/image/productId** merged
+  in from `/collections/<x>/products.json` by handle. This is the only mode that returns
+  reliable titles AND correct order.
+- `"html"`: HTML order only; `title`/`imageUrl` may be `null` on image-only themes.
+- `"shopify_json"`: products.json only. NOTE: this feed CANNOT sort — order is the store's
+  default, NOT best-selling. A warning is emitted and `rawMetadata.orderReliable` is false.
+  Avoid for ranking.
+
+### Example request
+```http
+POST /api/listings/track
+x-api-key: <API_KEY>
+content-type: application/json
+
+{ "url": "https://hausofmode.de/collections/all?sort_by=best-selling" }
+```
+
+### Response `200`
+```ts
 {
   "success": true,
-  "fileBaseUrl": "https://seoscrapebackend-production.up.railway.app/files/runs/20260529t163141z-shop-com-60be737d",
-  "dataUrl": "https://seoscrapebackend-production.up.railway.app/files/runs/20260529t163141z-shop-com-60be737d/data.json",
-  "result": {
-    "kind": "collection",
-    "finalUrl": "https://shop.com/collections/dresses",
-    "discoveredProductUrls": ["https://shop.com/products/a", "https://shop.com/products/b"],
-    "products": [
-      { "url": "https://shop.com/products/a", "success": true,  "result": { /* a "product" result, see §4A */ }, "fileBaseUrl": "/files/runs/…" },
-      { "url": "https://shop.com/products/b", "success": false, "error": { "code": "PAGE_LOAD_FAILED", "message": "…" } }
-    ],
-    "summary": { "discovered": 2, "succeeded": 1, "failed": 1 },
-    "warnings": [],
-    "errors": []
-  }
-}
-```
-Loop over `result.products`. Each item has its **own** `success` flag and its own
-`fileBaseUrl` (when it succeeded).
-
----
-
-## 5. Errors you may get from `/api/check-product`
-
-Returned as `{ "success": false, "error": { "code", "message" } }`.
-
-| `code` | Meaning | Should you retry? |
-|---|---|---|
-| `INVALID_URL` | The URL or body was malformed | No — fix the input |
-| `DOMAIN_NOT_ALLOWED` | Host not allowed, or a private/localhost address | No |
-| `PAGE_LOAD_FAILED` | The page didn't load (timeout / blocked / 4xx-5xx) | Yes, after a short wait |
-| `NO_PRODUCT_DATA_FOUND` | Nothing product-like found | No (wrong page?) |
-| `IMAGE_DOWNLOAD_FAILED` | Image fetching failed | Maybe — inspect `result` if present |
-| `OUTPUT_WRITE_FAILED` | Server couldn't save the run | Yes, later |
-| `UNAUTHORIZED` | Missing/wrong API key | No — add the key |
-| `UNKNOWN_ERROR` | Unexpected | Retry once |
-
-A single product check can take **a few seconds up to ~1 minute** (real browser +
-image downloads). Use a client timeout of **120 seconds**.
-
----
-
-## 6. `GET /api/check-progress/{runId}` — optional live progress
-
-If you want a progress feed while a scrape runs:
-1. Make up a unique `runId` (any string / UUID).
-2. Open this URL as a **Server-Sent Events** stream (no key needed).
-3. Call `POST /api/check-product` with that same `runId` in the body.
-
-### What you receive
-
-Each event's `data` is JSON like:
-```json
-{ "phase": "downloading-images", "message": "Downloading 8 image candidates.", "current": 3, "total": 12 }
-```
-
-Common phases:
-
-| Phase | Meaning |
-|---|---|
-| `queued` | Request accepted |
-| `loading` | Main URL is opening in Chromium |
-| `loaded` | Initial page finished rendering |
-| `collection-discovered` | The page looks like a category/listing page |
-| `product-start` | A discovered product scrape started |
-| `product-complete` | A product scrape finished successfully |
-| `product-failed` | A product scrape failed |
-| `complete` | The request finished |
-| `failed` | The request ended in error |
-
-This stream is **status only**. The final data comes from the POST response and the saved `dataUrl`.
-
----
-
-## 7. `GET /files/runs/{runId}/...` — saved files
-
-Static files from a run. No key needed. The response gives you full URLs already.
-Use these to fetch the saved data or images:
-
-```
-https://seoscrapebackend-production.up.railway.app/files/runs/<id>/images/001-main.png
-https://seoscrapebackend-production.up.railway.app/files/runs/<id>/data.json      (the full result)
-https://seoscrapebackend-production.up.railway.app/files/runs/<id>/raw/page.html   (raw rendered HTML)
-
-`data.json` is the canonical output. It contains the full final `result` object,
-including:
-- SEO metadata
-- product data
-- discovered/downloaded/skipped images
-- warnings and errors
-- collection `products[]` when the input was a listing page
-```
-
----
-
-## 8. Best-seller rank tracking
-
-Tracks the order of products on a sorted "best-selling" listing and tells you how
-ranks moved since the last time you checked the same listing.
-
-### `POST /api/listings/track`
-
-**Send:**
-```json
-{ "url": "https://shop.com/collections/all?sort_by=best-selling", "sourceStrategy": "auto", "maxProducts": 100, "maxPages": 10, "runId": "abc", "enrich": false }
-```
-- `url` (required).
-- `sourceStrategy` (optional): `"auto"` (default), `"html"`, `"shopify_json"`, or `"both"`.
-- `maxProducts` (optional): 1–250, default 100.
-- `maxPages` (optional): how many listing pages to walk (pagination). Default
-  `MAX_COLLECTION_PAGES` (10), capped at the server ceiling.
-- `runId` (optional): receive live progress on `/api/check-progress/{runId}` (§6).
-- `enrich` (optional, default false): if true, after the ranking is returned the
-  server runs a **background** full SEO + image scrape of every product
-  (concurrency-limited). It never blocks this response — watch its progress on
-  the same `runId` (phases: `enrich-start`, `enrich-product-done`,
-  `enrich-product-failed`, `enrich-complete`). Each finished product's
-  `fileBaseUrl` arrives in the progress event's `url` field.
-
-The `track` response also includes `"enriching": true|false` so you know whether
-background enrichment was started.
-
-**Get back:**
-```jsonc
-{
-  "success": true,
-  "fileBaseUrl": "/files/runs/20260529t163141z-shop-com-60be737d",
-  "dataUrl": "/files/runs/20260529t163141z-shop-com-60be737d/data.json",
+  "enriching": false,                 // always false
   "result": {
     "kind": "listing_rank_snapshot",
-    "trackedListingId": "uuid",     // SAVE THIS to read history later
-    "storeDomain": "shop.com",
-    "sourceUsed": "shopify_json",
-    "checkedAt": "2026-05-29T…Z",
-    "items": [                      // current ranking, in order
-      { "rank": 1, "productKey": "…", "url": "…", "title": "…", "imageUrl": "…", "source": "shopify_json" }
+    "snapshotId": string,             // id of THIS snapshot
+    "trackedListingId": string,       // STABLE id per (storeDomain + path + sort_by). Persist it.
+    "listingKey": string,             // e.g. "hausofmode.de|/collections/all|sort_by=best-selling"
+    "storeDomain": string,
+    "listingUrl": string,
+    "sourceStrategy": ListingSourceStrategy,
+    "sourceUsed": ListingSourceUsed,  // what actually produced the items
+    "checkedAt": string,              // ISO timestamp of this run
+    "items": ListingRankItem[],       // current ranking, ascending rank, length ≤ maxProducts
+    "changes": ListingRankChange[],   // per-product diff vs the previous snapshot
+    "summary": {
+      "tracked": number,              // = items.length
+      "new": number,                  // products not present last run
+      "movedUp": number,
+      "movedDown": number,
+      "unchanged": number,
+      "missing": number               // products present last run, absent now
+    },
+    "warnings": string[]              // non-fatal notes (e.g. order-unreliable, pagination)
+  }
+}
+```
+
+### Example response (abridged)
+```json
+{
+  "success": true,
+  "enriching": false,
+  "result": {
+    "kind": "listing_rank_snapshot",
+    "snapshotId": "eb939748-ca62-4b9e-8fcc-72907963731a",
+    "trackedListingId": "26bc00ce-531e-41c6-980b-d52a610741da",
+    "listingKey": "hausofmode.de|/collections/all|sort_by=best-selling",
+    "storeDomain": "hausofmode.de",
+    "listingUrl": "https://hausofmode.de/collections/all?sort_by=best-selling",
+    "sourceStrategy": "both",
+    "sourceUsed": "both",
+    "checkedAt": "2026-06-01T15:40:00.000Z",
+    "items": [
+      {
+        "rank": 1,
+        "productKey": "shopify:14852450484549",
+        "title": "\"Du wirst immer beschützt sein\" - Böser Blick Halskette",
+        "imageUrl": "https://hausofmode.de/cdn/shop/files/xxx.jpg",
+        "url": "https://hausofmode.de/products/du-wirst-immer-beschutzt-sein-boser-blick-halskette",
+        "handle": "du-wirst-immer-beschutzt-sein-boser-blick-halskette",
+        "productId": "14852450484549",
+        "source": "both"
+      }
     ],
-    "changes": [                    // vs the previous snapshot
-      { "productKey": "…", "title": "…", "previousRank": 3, "currentRank": 1, "delta": 2, "direction": "up" }
+    "changes": [
+      {
+        "productKey": "shopify:14852450484549",
+        "title": "\"Du wirst immer beschützt sein\" - Böser Blick Halskette",
+        "url": "https://hausofmode.de/products/du-wirst-immer-beschutzt-sein-boser-blick-halskette",
+        "handle": "du-wirst-immer-beschutzt-sein-boser-blick-halskette",
+        "previousRank": 3,
+        "currentRank": 1,
+        "delta": 2,
+        "direction": "up",
+        "previousSnapshotId": "8d7b040a-fef6-442c-bcae-51f10cd3e6b7",
+        "currentSnapshotId": "eb939748-ca62-4b9e-8fcc-72907963731a"
+      }
     ],
-    "summary": { "tracked": 100, "new": 4, "movedUp": 21, "movedDown": 18, "unchanged": 55, "missing": 2 },
+    "summary": { "tracked": 85, "new": 0, "movedUp": 1, "movedDown": 0, "unchanged": 84, "missing": 0 },
     "warnings": []
   }
 }
 ```
-- `direction` is one of `up`, `down`, `same`, `new`, `missing`. `delta` positive = moved up.
-- The **first** time you track a listing, everything is `"new"`.
 
-### `GET /api/listings/{trackedListingId}/latest`
-Most recent snapshot + its ranked `items`. Needs the key.
-
-### `GET /api/listings/{trackedListingId}/history`
-Up to 50 recent snapshots (metadata). Needs the key.
-
-If a listing/snapshot id is unknown → `404 { error.code: "NOT_FOUND" }`.
+### Semantics the integration MUST honor
+- **First run for a listing:** there is no previous snapshot, so every entry in `changes`
+  has `direction:"new"` and `previousRank:null`. From the 2nd run on, real diffs appear.
+- **Identity:** join/compare products on `productKey` (stable). Do NOT key on `title`.
+- **Server retention is minimal:** the backend keeps only the baseline (first) and the
+  latest snapshot per `trackedListingId`. To build long-term history/graphs, the caller
+  MUST persist `items` + `changes` + `checkedAt` for each run in its own store.
+- **Errors:** `502 NO_PRODUCT_DATA_FOUND` (nothing extractable), `502 PAGE_LOAD_FAILED`
+  (blocked/unreachable), `400 INVALID_URL`/`DOMAIN_NOT_ALLOWED`.
 
 ---
 
-## 9. Minimal worked example (pseudocode)
+## 3) `GET /api/listings/:listingId/history`
+- `:listingId` = `trackedListingId` (UUID).
+- Auth: required.
+- Response `200`:
+  ```ts
+  { "success": true, "result": {
+      "listing": { "id": string, "storeDomain": string, "listingKey": string, "listingUrl": string },
+      "snapshots": Array<{ "id": string, "checkedAt": string, "itemCount": number, "sourceUsed": ListingSourceUsed }>
+  } }
+  ```
+- Returns **at most 2** snapshots (baseline + latest). Not a long-term history source.
+- `404 NOT_FOUND` if the listing id is unknown.
 
-```python
-BASE = "https://seoscrapebackend-production.up.railway.app"
-H = {"Authorization": "Bearer <API_KEY>", "Content-Type": "application/json"}
+## 4) `GET /api/listings/:listingId/latest`
+- Auth: required.
+- Response `200`:
+  ```ts
+  { "success": true, "result": {
+      "listing": { "id": string, "storeDomain": string, "listingKey": string, "listingUrl": string },
+      "snapshot": { "id": string, "checkedAt": string, "items": ListingRankItem[] }
+  } }
+  ```
+- `404 NOT_FOUND` if no snapshot exists.
 
-r = POST(f"{BASE}/api/check-product", headers=H, json={"url": product_url}, timeout=120).json()
-if not r["success"]:
-    handle_error(r["error"]["code"]); return
+---
 
-res = r["result"]
-if res["kind"] == "collection":
-    for p in res["products"]:
-        if p["success"]:
-            use(p["result"], image_base=BASE + p["fileBaseUrl"])
-else:
-    title = res["product"]["title"]["value"] or res["seo"]["title"]["value"]
-    desc  = res["product"]["description"]["value"] or res["seo"]["description"]["value"]
-    images = [f'{BASE}{r["fileBaseUrl"]}/{img["filePath"]}' for img in res["images"]["downloaded"]]
-    use(title, desc, images)
+## 5) `POST /api/check-product`  — full single-product/collection research (HEAVY, on-demand)
+Renders a page (headless browser, with a direct-fetch fallback), extracts full SEO +
+product metadata, downloads + dedupes images to disk, returns file URLs.
+
+### Request body
+| field | type | required | default | meaning |
+|---|---|---|---|---|
+| `url` | string | **yes** | — | A product URL (kind `"product"`) or a collection URL (kind `"collection"`, scrapes each product — heavy). |
+| `responseMode` | `"full" \| "url"` | no | `"full"` | `"full"` returns the whole result object; `"url"` returns only file links. |
+| `maxPages` | integer | no | `10` | Pages to crawl for a collection URL. |
+| `runId` | string | no | — | Correlates with the SSE progress stream. |
+
+### Response `200` — `responseMode:"full"`
+```ts
+{
+  "success": true,
+  "fileBaseUrl": string,   // absolute, e.g. "https://<host>/files/runs/<runId>"
+  "dataUrl": string,       // absolute, "<fileBaseUrl>/data.json"
+  "result": CheckResult
+}
+```
+### Response `200` — `responseMode:"url"`
+```ts
+{ "success": true, "kind": "product" | "collection", "fileBaseUrl": string, "dataUrl": string,
+  "summary"?: { "discovered": number, "succeeded": number, "failed": number } }  // summary only for collections
 ```
 
+### `CheckResult` (discriminated by `kind`)
+```ts
+ProductCheckResult = {
+  kind: "product"
+  inputUrl: string
+  finalUrl: string
+  domain: string
+  checkedAt: string
+  seo: {
+    title: ExtractedField<string|null>          // the page <title> when source="title_tag"
+    description: ExtractedField<string|null>
+    canonicalUrl: ExtractedField<string|null>
+    openGraph: Record<string,string>            // e.g. {"og:title":..,"og:image":..}
+    twitter: Record<string,string>
+  }
+  seoSnapshot: { /* flattened SEO record: title, description, canonicalUrl, productTitle,
+                    productDescription, openGraph, twitter, structuredData, downloadedImages[] */ }
+  product: {
+    title: ExtractedField<string|null>          // product NAME (jsonld Product.name > og:title > h1)
+    description: ExtractedField<string|null>
+    structuredData: unknown[]                   // JSON-LD Product/Offer/etc nodes
+  }
+  images: {
+    discovered: Array<{ url, normalizedUrl, source, alt?, width?, height?, contentType? }>
+    downloaded: Array<{ originalUrl, filePath, filename, bytes, width?, height?, sha256, perceptualHash?, groupId?, reason }>
+    skipped: Array<{ originalUrl, reason, similarTo?, confidence? }>
+    strategy: { mode: "selective"|"download_all_fallback"|"worker_url_only", reason, groups[] }
+  }
+  files: { outputDir, dataJsonPath, seoJsonPath, rawHtmlPath, rawMetadataPath }  // server paths; nullable
+  warnings: string[]
+  errors: string[]
+}
+
+CollectionCheckResult = {
+  kind: "collection"
+  inputUrl, finalUrl, domain, checkedAt
+  discoveredProductUrls: string[]
+  products: Array<
+      { url, success: true, result: ProductCheckResult, fileBaseUrl: string|null }
+    | { url, success: false, error: { code: ErrorCode, message: string } }
+  >
+  summary: { discovered: number, succeeded: number, failed: number }
+  warnings: string[]; errors: string[]
+}
+```
+### How to use the result
+- Page title: `result.seo.title.value`. Product name: `result.product.title.value`.
+- Main image (hosted copy): `` `${fileBaseUrl}/${result.images.downloaded[0].filePath}` `` → e.g. `.../files/runs/<id>/images/001-main.jpg`.
+- Or source URL on the store: `result.images.downloaded[0].originalUrl`.
+- **Files are TEMPORARY:** run folders under `fileBaseUrl` are deleted after `RUN_RETENTION_DAYS`
+  (default 7 days) and capped at the newest `RUN_MAX_COUNT` (default 300). Download/persist
+  anything you need to keep promptly.
+
 ---
 
-## 10. Remember
+## 6) `GET /api/check-progress/:runId`  — live progress (Server-Sent Events)
+- Auth: none. Content-Type `text/event-stream`.
+- Pass the same `runId` you sent in a `POST /api/check-product` or `/api/listings/track`
+  body, then open an `EventSource` here.
+- Each event line: `data: ` + JSON of:
+  ```ts
+  { "phase": string, "message": string, "url"?: string, "current"?: number, "total"?: number }
+  ```
+- A terminal event with `phase:"complete"` is sent when the run finishes. Optional; not
+  required for correctness.
 
-- Send the **API key** on every protected call. Check **`success`** first.
-- Branch product vs collection on **`result.kind`**.
-- Use `dataUrl` if you want to store the final JSON outside the API.
-- Build image URLs as **`result.fileBaseUrl + "/" + filePath`**.
-- Allow up to **120s** per scrape; retry only the transient error codes.
-- Image de-duplication is deterministic (hashing + visual comparison) — no AI is
-  used server-side, so results are consistent for the same input.
+---
+
+## 7) `POST /api/admin/cleanup-runs`  — free disk (research files)
+- Auth: required.
+- Body: `{ "olderThanDays"?: number }`. Omit or `0` → delete ALL run folders; `>0` → delete
+  runs older than N days.
+- Response `200`: `{ "success": true, "removed": number, "scope": string }`.
+- Safe: run folders are regenerable; rank tracking stores nothing on disk.
+
+## 8) `GET /api/admin/storage`  — read-only disk usage
+- Auth: required.
+- Response `200`: `{ "success": true, "runs": number, "freeBytes": number|null, "totalBytes": number|null, "usedPct": number|null }`.
+
+## 9) `GET /files/runs/<runId>/...`  — static run artifacts
+- Auth: none (unguessable run id). Serves `data.json`, `seo.json`, `images/*`, `raw/page.html`.
+- Subject to the same retention as §5.
+
+---
+
+## Operating rules (for the calling system)
+1. **Scheduling:** the backend has no scheduler. The caller triggers runs. For daily rank
+   tracking, run a once-per-day job per tracked `url`.
+2. **Concurrency / backpressure:** the backend has no internal queue. Do NOT fire all
+   listings at once. Use ≤ 3 concurrent `track` calls, a per-call timeout of ~120s, and
+   the retry policy above. Heavy `check-product` calls: ≤ 1–2 concurrent.
+3. **Persistence:** treat the backend as stateless beyond baseline+latest. Persist every
+   run's `items`/`changes`/`checkedAt` in the caller's database for history.
+4. **Identity:** always key products on `productKey`.
+5. **URL:** always include `?sort_by=best-selling` for ranking.
+6. **Defaults:** omit `sourceStrategy` and `maxProducts` to get `both` + `150`.
