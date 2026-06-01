@@ -41,13 +41,41 @@ describe("extractListingItems — plain-fetch HTML tier (auto)", () => {
     const url = new URL("https://shop.example/collections/all?sort_by=best-selling");
     const result = await extractListingItems(url, "auto", 100, 3);
 
+    // auto = html order (+ json enrichment; json is empty in this mock).
     expect(result.sourceUsed).toBe("html");
-    expect(result.rawMetadata.tier).toBe("fetched-html");
     expect(result.rawMetadata.orderReliable).toBe(true);
     expect(result.items.map((i) => i.rank)).toEqual([1, 2, 3, 4]);
     expect(result.items.map((i) => i.handle)).toEqual(order);
     // Best-seller must be rank #1, not buried later.
     expect(result.items[0]?.handle).toBe("mattis-1");
+  });
+
+  it("extracts titles from image-only anchors (img alt / card heading)", async () => {
+    const html = `<html><body><ul class="grid">
+      <li class="card"><a href="/products/p1">Text Title One</a></li>
+      <li class="card"><a href="/products/p2"><img src="/i2.jpg" alt="Alt Title Two"></a></li>
+      <li class="card"><a href="/products/p3"><img src="/i3.jpg"></a><h3 class="card__title">Heading Title Three</h3></li>
+    </ul></body></html>`;
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const u = new URL(input.toString());
+      const page = Number(u.searchParams.get("page") ?? "1");
+      const res = new Response(page === 1 ? html : "<html><body></body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+      Object.defineProperty(res, "url", { value: u.toString() });
+      return res;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const url = new URL("https://shop.example/collections/all?sort_by=best-selling");
+    const result = await extractListingItems(url, "html", 100, 2);
+
+    expect(result.items.map((i) => i.title)).toEqual([
+      "Text Title One",
+      "Alt Title Two",
+      "Heading Title Three",
+    ]);
   });
 });
 

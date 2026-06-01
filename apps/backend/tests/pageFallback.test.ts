@@ -7,14 +7,17 @@ describe("isRedirectAway", () => {
   it("flags a redirect to the home page", () => {
     expect(isRedirectAway(collection, "https://jacinnewyork.co/")).toBe(true);
   });
-  it("allows the same path (query dropped)", () => {
-    expect(isRedirectAway(collection, "https://jacinnewyork.co/collections/all")).toBe(false);
+  it("flags a dropped sort_by (same path, sort lost)", () => {
+    expect(isRedirectAway(collection, "https://jacinnewyork.co/collections/all")).toBe(true);
   });
-  it("allows www/host change on the same path", () => {
+  it("allows www/host change when sort_by is preserved", () => {
     expect(isRedirectAway(collection, "https://www.jacinnewyork.co/collections/all?sort_by=best-selling")).toBe(false);
   });
-  it("ignores a trailing slash difference", () => {
+  it("ignores a trailing slash difference (no sort requested)", () => {
     expect(isRedirectAway("https://x.co/collections/all", "https://x.co/collections/all/")).toBe(false);
+  });
+  it("does not flag a dropped non-sort query param", () => {
+    expect(isRedirectAway("https://x.co/collections/all?page=2", "https://x.co/collections/all")).toBe(false);
   });
   it("flags a redirect to a different product", () => {
     expect(isRedirectAway("https://x.co/products/a", "https://x.co/products/b")).toBe(true);

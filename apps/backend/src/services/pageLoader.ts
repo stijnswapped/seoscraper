@@ -92,7 +92,13 @@ export function isRedirectAway(targetUrl: string, navUrl: string): boolean {
     const nav = new URL(navUrl, targetUrl);
     const tp = (target.pathname.replace(/\/+$/, "") || "/").toLowerCase();
     const np = (nav.pathname.replace(/\/+$/, "") || "/").toLowerCase();
-    return tp !== np;
+    if (tp !== np) return true;
+    // Same path, but if we asked for a specific sort (e.g. ?sort_by=best-selling)
+    // and the page dropped/changed it, the order we'd capture is wrong — treat as
+    // a redirect-away so the caller falls back to a direct fetch (which keeps it).
+    const wantSort = target.searchParams.get("sort_by");
+    if (wantSort && nav.searchParams.get("sort_by") !== wantSort) return true;
+    return false;
   } catch {
     return false;
   }

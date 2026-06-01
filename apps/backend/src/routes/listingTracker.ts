@@ -45,8 +45,10 @@ export function registerListingTrackerRoutes(app: FastifyInstance): void {
       progress({ phase: "queued", message: "Listing track accepted.", url: parsed.data.url });
       const result = await trackListing({
         url: parsed.data.url,
-        sourceStrategy: normalizeSourceStrategy(parsed.data.sourceStrategy),
-        maxProducts: parsed.data.maxProducts ?? 100,
+        // Default to "both": best-selling order from HTML + reliable title/image
+        // from products.json. (auto also enriches, so any value gets titles.)
+        sourceStrategy: normalizeSourceStrategy(parsed.data.sourceStrategy ?? "both"),
+        maxProducts: parsed.data.maxProducts ?? 150,
         maxPages: parsed.data.maxPages,
         progress,
       });

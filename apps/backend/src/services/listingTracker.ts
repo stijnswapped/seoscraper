@@ -162,51 +162,20 @@ export async function extractListingItems(
     return { sourceUsed: "html", items, warnings, rawMetadata: { htmlCount: items.length, tier, orderReliable: true } };
   }
 
-  if (strategy === "both") {
-    let htmlItems = await fetchHtml();
-    if (htmlItems.length === 0) htmlItems = await browserHtml();
-    const shopifyItems = await shopifyJson();
-    const orderReliable = htmlItems.length > 0 || !hasSortBy;
-    if (hasSortBy && htmlItems.length === 0 && shopifyItems.length > 0) warnings.push(ORDER_UNRELIABLE_WARNING);
-    return {
-      sourceUsed: htmlItems.length > 0 && shopifyItems.length > 0 ? "both" : htmlItems.length > 0 ? "html" : "shopify_json",
-      items: mergeListingItems(htmlItems, shopifyItems, maxProducts),
-      warnings,
-      rawMetadata: { htmlCount: htmlItems.length, shopifyCount: shopifyItems.length, orderReliable },
-    };
-  }
-
-  // auto: plain-fetch HTML -> browser HTML -> products.json
-  const fetchedItems = await fetchHtml();
-  if (fetchedItems.length > 0) {
-    return {
-      sourceUsed: "html",
-      items: fetchedItems,
-      warnings,
-      rawMetadata: { htmlCount: fetchedItems.length, tier: "fetched-html", orderReliable: true },
-    };
-  }
-
-  const browserItems = await browserHtml();
-  if (browserItems.length > 0) {
-    return {
-      sourceUsed: "html",
-      items: browserItems,
-      warnings,
-      rawMetadata: { htmlCount: browserItems.length, tier: "browser-html", orderReliable: true },
-    };
-  }
-
+  // auto + both: best-selling ORDER from HTML (fetch first, browser fallback),
+  // TITLE/IMAGE/productId enriched from products.json (merged by handle). The
+  // HTML fetch preserves the exact ?sort_by=best-selling URL (no JS), so the
+  // order is reliable; json only fills display fields.
+  let htmlItems = await fetchHtml();
+  if (htmlItems.length === 0) htmlItems = await browserHtml();
   const shopifyItems = await shopifyJson();
-  if (shopifyItems.length > 0) {
-    warnings.push("Rendered HTML did not expose product links; used Shopify products JSON fallback.");
-    if (hasSortBy) warnings.push(ORDER_UNRELIABLE_WARNING);
-  }
+  const orderReliable = htmlItems.length > 0 || !hasSortBy;
+  if (hasSortBy && htmlItems.length === 0 && shopifyItems.length > 0) warnings.push(ORDER_UNRELIABLE_WARNING);
   return {
-    sourceUsed: "shopify_json",
-    items: shopifyItems,
+    sourceUsed: htmlItems.length > 0 && shopifyItems.length > 0 ? "both" : htmlItems.length > 0 ? "html" : "shopify_json",
+    items: mergeListingItems(htmlItems, shopifyItems, maxProducts),
     warnings,
-    rawMetadata: { htmlCount: 0, shopifyCount: shopifyItems.length, tier: "shopify-json", orderReliable: !hasSortBy },
+    rawMetadata: { htmlCount: htmlItems.length, shopifyCount: shopifyItems.length, orderReliable },
   };
 }
 
@@ -322,7 +291,7 @@ function collectProductLinks(
     if (!productUrl) return;
     const product = productIdentity(productUrl);
     if (byKey.has(product.productKey)) return;
-    const title = cleanText($(el).text()) ?? cleanText($(el).attr("aria-label"));
+    const title = findProductTitle($, el);
     const imageUrl = findNearestImageUrl($, el, finalUrl);
     byKey.set(product.productKey, {
       rank: byKey.size + 1,
@@ -548,6 +517,28 @@ function productIdentity(productUrl: string): { productKey: string; handle?: str
   const match = url.pathname.match(/\/products\/([^/?#]+)/i);
   const handle = match?.[1]?.toLowerCase();
   return handle ? { productKey: `handle:${handle}`, handle } : { productKey: productUrl };
+}
+
+/**
+ * Best-effort product title for a listing anchor. Many themes use image-only
+ * product links (no anchor text), so fall back through aria-label / title attr /
+ * nested img alt / the nearest card heading. (products.json enrichment fills the
+ * rest by handle, but this keeps html-only items from having a null title.)
+ */
+function findProductTitle($: CheerioAPI, el: Element): string | undefined {
+  const link = $(el);
+  const fromLink =
+    cleanText(link.text()) ??
+    cleanText(link.attr("aria-label")) ??
+    cleanText(link.attr("title")) ??
+    cleanText(link.find("img").first().attr("alt"));
+  if (fromLink) return fromLink;
+
+  const card = link.closest("li, article, div, section");
+  const heading = card
+    .find("h2, h3, h4, [class*=title], [class*=name], [class*=Title], [class*=Name]")
+    .first();
+  return cleanText(heading.text());
 }
 
 function findNearestImageUrl($: CheerioAPI, el: Element, finalUrl: string): string | null {
