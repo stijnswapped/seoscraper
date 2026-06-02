@@ -1,4 +1,4 @@
-import { load, type CheerioAPI } from "cheerio";
+import { load, type Cheerio, type CheerioAPI } from "cheerio";
 import type { Element } from "domhandler";
 import { sitesConfig } from "../../../../config/sites.config.js";
 import type {
@@ -284,6 +284,97 @@ async function extractFetchedHtmlListingItems(
   return [...byKey.values()].map((item, index) => ({ ...item, rank: index + 1 }));
 }
 
+/**
+ * Containers whose product links are NOT part of the collection's ranked grid:
+ * site chrome (header/nav/footer/menus/cart drawer) and cross-sell/upsell blocks
+ * (add-on products, recommendations, "related", "you may also like"). These link
+ * to the same products regardless of the collection's sort order, and many appear
+ * BEFORE the grid in the DOM — so counting them buries the real best-selling grid
+ * under fixed menu/upsell items, making a ?sort_by=best-selling listing look
+ * identical to the default order. (Observed on themes with an "add-on-products"
+ * upsell block rendered above the grid.)
+ */
+const NON_GRID_LINK_CONTAINER = [
+  "header",
+  "nav",
+  "footer",
+  '[class*="mega-menu" i]',
+  '[class*="menu-drawer" i]',
+  '[class*="site-nav" i]',
+  '[class*="drawer" i]',
+  '[class*="mini-cart" i]',
+  '[class*="cart-drawer" i]',
+  '[class*="add-on" i]',
+  '[class*="addon" i]',
+  '[class*="upsell" i]',
+  '[class*="cross-sell" i]',
+  '[class*="recommend" i]',
+  '[class*="related-product" i]',
+  '[class*="also-like" i]',
+  '[class*="you-may" i]',
+  '[class*="frequently-bought" i]',
+  '[class*="predictive" i]',
+  '[class*="complementary" i]',
+].join(", ");
+
+/**
+ * Markers that positively identify the collection's product-grid container across
+ * common Shopify themes. Scoping to the grid (rather than the whole page) keeps
+ * menu / upsell / recommendation links — identical across sort orders — out of the
+ * ranking, so ?sort_by=best-selling reflects the real on-page grid order.
+ * hausofmode.de matches via data-section-type="collection-grid"; Dawn via
+ * #product-grid / [class*="product-grid"].
+ */
+const GRID_CONTAINER = [
+  '[data-section-type*="collection-grid" i]',
+  '[data-section-type*="collection-template" i]',
+  '[data-section-type*="main-collection" i]',
+  "#product-grid",
+  "#ProductGridContainer",
+  "#CollectionProductGrid",
+  "#CollectionAjaxContent",
+  '[class*="product-grid" i]',
+  '[class*="collection-grid" i]',
+  '[class*="products-grid" i]',
+  '[class*="collection-products" i]',
+].join(", ");
+
+/**
+ * The ordered product anchors to rank for a listing page, most-reliable signal
+ * first:
+ *   1. the product-grid container with the most distinct product links (the real
+ *      grid; chrome/upsell blocks match no grid marker, so they're excluded
+ *      structurally — and any nested recommend block is still dropped by the
+ *      NON_GRID filter);
+ *   2. otherwise every anchor minus NON_GRID_LINK_CONTAINER (chrome/upsell);
+ *   3. otherwise every anchor (only if the filter removed everything).
+ */
+function selectListingAnchors($: CheerioAPI): Cheerio<Element> {
+  const dropChrome = (els: Cheerio<Element>) =>
+    els.filter((_, el) => $(el).closest(NON_GRID_LINK_CONTAINER).length === 0);
+
+  const countHandles = (anchors: Cheerio<Element>): number => {
+    const handles = new Set<string>();
+    anchors.each((_, el) => {
+      const match = ($(el).attr("href") ?? "").match(/\/products\/([^/?#]+)/i);
+      if (match?.[1]) handles.add(match[1].toLowerCase());
+    });
+    return handles.size;
+  };
+
+  type GridMatch = { anchors: Cheerio<Element>; count: number };
+  let best: GridMatch | null = null;
+  for (const container of $(GRID_CONTAINER).toArray()) {
+    const anchors = dropChrome($(container).find("a[href]"));
+    const count = countHandles(anchors);
+    if (count >= 2 && (!best || count > best.count)) best = { anchors, count };
+  }
+  if (best) return best.anchors;
+
+  const filtered = dropChrome($("a[href]"));
+  return filtered.length > 0 ? filtered : $("a[href]");
+}
+
 /** Walk product anchors in DOM order, appending newly-seen products to `byKey`. */
 function collectProductLinks(
   $: CheerioAPI,
@@ -291,7 +382,11 @@ function collectProductLinks(
   byKey: Map<string, ListingRankItem>,
   maxProducts: number,
 ): void {
-  $("a[href]").each((_, el) => {
+  // Rank only the real product grid (see selectListingAnchors) so the order
+  // reflects the requested sort_by, not menu/cart/upsell links that are identical
+  // across every sort order.
+  const anchors = selectListingAnchors($);
+  anchors.each((_, el) => {
     if (byKey.size >= maxProducts) return;
     const href = $(el).attr("href");
     if (!href) return;

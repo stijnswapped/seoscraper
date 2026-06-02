@@ -79,6 +79,88 @@ describe("extractListingItems — plain-fetch HTML tier (auto)", () => {
   });
 });
 
+/**
+ * A collection page that renders an "add-on products" upsell block (identical
+ * across sorts) BEFORE the real grid, mirroring hausofmode.de. `gridContainer`
+ * lets us exercise both grid markers (data-section-type and #product-grid).
+ */
+function pageWithUpsellAboveGrid(
+  upsell: string[],
+  grid: string[],
+  gridContainer: "data-section" | "id",
+): string {
+  const links = (handles: string[]) =>
+    handles.map((h) => `<a href="/products/${h}">${h}</a>`).join("");
+  const open =
+    gridContainer === "data-section"
+      ? '<div data-section-type="collection-grid">'
+      : '<ul id="product-grid">';
+  const close = gridContainer === "data-section" ? "</div>" : "</ul>";
+  return `<html><body>
+    <header><a href="/products/${grid[0]}">menu link to a product</a></header>
+    <div class="add-on-products">${links(upsell)}</div>
+    ${open}${links(grid)}${close}
+  </body></html>`;
+}
+
+function fetchHtmlPage1(html: string) {
+  const mock = vi.fn(async (input: string | URL) => {
+    const u = new URL(input.toString());
+    const page = Number(u.searchParams.get("page") ?? "1");
+    const res = new Response(page === 1 ? html : "<html><body></body></html>", {
+      status: 200,
+      headers: { "content-type": "text/html" },
+    });
+    Object.defineProperty(res, "url", { value: u.toString() });
+    return res;
+  });
+  vi.stubGlobal("fetch", mock);
+}
+
+describe("extractListingItems — ranks the real grid, not menu/upsell links", () => {
+  it.each(["data-section", "id"] as const)(
+    "ignores an add-on-products upsell block above the grid (%s marker)",
+    async (marker) => {
+      fetchHtmlPage1(
+        pageWithUpsellAboveGrid(["upsell-a", "upsell-b"], ["x", "y", "z"], marker),
+      );
+      const url = new URL("https://shop.example/collections/all?sort_by=best-selling");
+      const result = await extractListingItems(url, "html", 100, 2);
+
+      // Grid order wins; the upsell + header links never enter the ranking.
+      expect(result.items.map((i) => i.handle)).toEqual(["x", "y", "z"]);
+      expect(result.items.map((i) => i.handle)).not.toContain("upsell-a");
+      expect(result.items[0]?.handle).toBe("x");
+    },
+  );
+
+  it("yields different top items for different grid order (sorted vs default)", async () => {
+    fetchHtmlPage1(
+      pageWithUpsellAboveGrid(["upsell-a", "upsell-b"], ["best-1", "best-2", "best-3"], "data-section"),
+    );
+    const sorted = await extractListingItems(
+      new URL("https://shop.example/collections/all?sort_by=best-selling"),
+      "html",
+      100,
+      1,
+    );
+
+    fetchHtmlPage1(
+      pageWithUpsellAboveGrid(["upsell-a", "upsell-b"], ["alpha", "beta", "gamma"], "data-section"),
+    );
+    const def = await extractListingItems(
+      new URL("https://shop.example/collections/all"),
+      "html",
+      100,
+      1,
+    );
+
+    expect(sorted.items[0]?.handle).toBe("best-1");
+    expect(def.items[0]?.handle).toBe("alpha");
+    expect(sorted.items[0]?.handle).not.toBe(def.items[0]?.handle);
+  });
+});
+
 describe("extractListingItems — shopify_json fallback warns about lost sort order", () => {
   it("flags order as unreliable when sort_by is present", async () => {
     const fetchMock = vi.fn(async (input: string | URL) => {
