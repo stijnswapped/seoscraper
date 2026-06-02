@@ -16,7 +16,6 @@ import {
   assertDomainAllowed,
   validateAndNormalizeUrl,
 } from "../utils/url.js";
-import type { CheerioAPI } from "cheerio";
 import {
   loadPageOrFetch,
   withBrowserSession,
@@ -27,8 +26,6 @@ import { extractMetadata } from "../services/metadataExtractor.js";
 import { extractProduct } from "../services/productExtractor.js";
 import { discoverImages } from "../services/imageDiscovery.js";
 import { downloadAndSelect } from "../services/imageDownloader.js";
-import { crawlPages, resolveMaxPages } from "../services/pagination.js";
-import { extractProductUrlsFromPage } from "../services/collectionDiscovery.js";
 import {
   createRun,
   writeData,
@@ -69,13 +66,9 @@ interface ApiResult {
 export async function runCheck(
   inputUrl: string,
   progress: ProgressReporter = () => {},
-  maxPagesRequested?: number,
 ): Promise<ApiResult> {
   const { url, hostname } = validateAndNormalizeUrl(inputUrl);
   assertDomainAllowed(hostname);
-
-  const maxPages = resolveMaxPages(maxPagesRequested);
-  const maxProducts = sitesConfig.collections.maxProducts;
 
   progress({ phase: "loading", message: "Rendering input URL.", url: url.toString() });
 
@@ -90,39 +83,19 @@ export async function runCheck(
    progress({ phase: "loaded", message: "Input URL loaded and settled.", url: page.finalUrl });
 
    const meta = extractMetadata(page.html, page.finalUrl);
-   const collection = discoverCollectionProducts(meta, page.finalUrl, maxProducts);
+   const collection = discoverCollectionProducts(meta, page.finalUrl, 1);
    if (!collection.isCollection) {
      return processProductPage(inputUrl, hostname, page, meta, progress);
    }
 
-   const urls = new Map<string, string>();
-   const addFrom = ($: CheerioAPI, finalUrl: string) => {
-     for (const productUrl of extractProductUrlsFromPage($, finalUrl)) {
-       if (urls.size >= maxProducts) break;
-       if (!urls.has(productUrl)) urls.set(productUrl, productUrl);
-     }
-   };
-
-   await crawlPages(
-     session,
-     page.finalUrl,
-     {
-       maxPages,
-       progress,
-       label: "Scanning collection",
-       scrollProfile: "listing",
-       firstPage: page,
-       shouldStop: () => urls.size >= maxProducts,
-     },
-     ({ $, finalUrl }) => addFrom($, finalUrl),
-   );
-
+   // For check-product we only sample the first product on the collection page.
+   // This skips multi-page crawling and bulk scraping for a much faster check.
    return runCollectionCheck(
      inputUrl,
      hostname,
      page,
      meta,
-     [...urls.values()].slice(0, maxProducts),
+     collection.productUrls.slice(0, 1),
      session,
      progress,
    );
@@ -419,7 +392,7 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
     const progress = createProgressReporter(parsed.data.runId);
     try {
       progress({ phase: "queued", message: "Check request accepted.", url: parsed.data.url });
-      const { result, fileBaseUrl, dataUrl } = await runCheck(parsed.data.url, progress, parsed.data.maxPages);
+      const { result, fileBaseUrl, dataUrl } = await runCheck(parsed.data.url, progress);
       const publicFileBaseUrl = toPublicUrl(request, fileBaseUrl!);
       const publicDataUrl = toPublicUrl(request, dataUrl!);
       if (parsed.data.responseMode === "url") {
