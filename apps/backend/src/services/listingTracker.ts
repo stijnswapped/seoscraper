@@ -229,13 +229,25 @@ async function extractFetchedHtmlListingItems(
   for (let page = 1; page <= maxPages && byKey.size < maxProducts; page++) {
     const pageUrl = buildPaginatedUrl(url, page);
     let html: string;
-    let finalUrl = pageUrl;
+    // Scrape exactly the URL that was requested — never the target of a redirect.
+    // `redirect: "manual"` makes a 3xx come back as a response we can inspect
+    // (instead of fetch silently following it to a canonical/other page), and we
+    // keep finalUrl pinned to the requested URL so links resolve against it.
+    const finalUrl = pageUrl;
     try {
       const response = await proxyFetch(pageUrl, {
         headers: buildRealisticHeaders(url.origin),
-        redirect: "follow",
+        redirect: "manual",
       });
-      finalUrl = response.url || pageUrl;
+      if (response.status >= 300 && response.status < 400) {
+        if (page === 1) {
+          warnings.push(
+            `Fetched HTML returned a redirect (HTTP ${response.status} → ${response.headers.get("location") ?? "unknown"}); ` +
+              "scraping only the requested URL, so the redirect was not followed.",
+          );
+        }
+        break;
+      }
       if (!response.ok) {
         if (page === 1) {
           warnings.push(
@@ -244,10 +256,6 @@ async function extractFetchedHtmlListingItems(
               : `Fetched HTML returned HTTP ${response.status}.`,
           );
         }
-        break;
-      }
-      if (!sameOrigin(pageUrl, finalUrl)) {
-        if (page === 1) warnings.push("Fetched HTML redirected to another origin and was ignored.");
         break;
       }
       html = await response.text();
