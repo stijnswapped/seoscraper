@@ -346,14 +346,20 @@ async function extractShopifyListingItems(
           "sec-fetch-dest": "empty",
           "sec-fetch-mode": "cors",
         },
-        redirect: "follow",
+        // Don't follow redirects: a renamed/merged collection 301s
+        // /collections/OLD/products.json → /collections/NEW/products.json on the
+        // SAME origin, which would silently return a different listing's products.
+        redirect: "manual",
       });
-      if (!response.ok) {
-        if (page === 1) warnings.push(`Shopify products JSON returned HTTP ${response.status}.`);
+      if (response.status >= 300 && response.status < 400) {
+        warnings.push(
+          `Shopify products JSON redirected (HTTP ${response.status} → ${response.headers.get("location") ?? "unknown"}); ` +
+            "scraping only the requested collection, so the redirect was not followed.",
+        );
         break;
       }
-      if (!sameOrigin(endpoint, response.url || endpoint)) {
-        warnings.push("Shopify products JSON redirected to another origin and was ignored.");
+      if (!response.ok) {
+        if (page === 1) warnings.push(`Shopify products JSON returned HTTP ${response.status}.`);
         break;
       }
       const data = (await response.json()) as unknown;
@@ -600,10 +606,4 @@ function asString(value: unknown): string | undefined {
   if (typeof value === "string" && value.trim()) return value.trim();
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   return undefined;
-}
-
-function sameOrigin(left: string, right: string): boolean {
-  const a = new URL(left);
-  const b = new URL(right);
-  return a.protocol === b.protocol && a.hostname.toLowerCase() === b.hostname.toLowerCase() && a.port === b.port;
 }
