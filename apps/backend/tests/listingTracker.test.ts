@@ -77,6 +77,28 @@ describe("extractListingItems — plain-fetch HTML tier (auto)", () => {
       "Heading Title Three",
     ]);
   });
+
+  it("combines duplicate image/title anchors from the same product card", async () => {
+    const html = `<html><body><ul class="grid">
+      <li class="card">
+        <a class="card-media" href="/products/p1">
+          <span>Varsovia Moda</span>
+          <img data-srcset="//cdn.shop.example/p1_800x.jpg 800w, //cdn.shop.example/p1_400x.jpg 400w" alt="Image Alt Title One">
+        </a>
+        <a class="card-title" href="/products/p1" data-product-title="Real Product Title One">
+          <span>Real Product Title One</span>
+        </a>
+      </li>
+    </ul></body></html>`;
+    fetchHtmlPage1(html);
+
+    const url = new URL("https://shop.example/collections/all?sort_by=best-selling");
+    const result = await extractListingItems(url, "html", 100, 2);
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.title).toBe("Image Alt Title One");
+    expect(result.items[0]?.imageUrl).toBe("https://cdn.shop.example/p1_800x.jpg");
+  });
 });
 
 /**

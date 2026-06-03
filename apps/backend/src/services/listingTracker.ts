@@ -393,9 +393,17 @@ function collectProductLinks(
     const productUrl = normalizeProductUrl(href, finalUrl);
     if (!productUrl) return;
     const product = productIdentity(productUrl);
-    if (byKey.has(product.productKey)) return;
     const title = findProductTitle($, el);
     const imageUrl = findNearestImageUrl($, el, finalUrl);
+    const existing = byKey.get(product.productKey);
+    if (existing) {
+      // Some Shopify themes render one image anchor and one title anchor for the
+      // same product. Keep the first rank, but let later duplicate anchors fill
+      // in better display fields.
+      if (!existing.title && title) existing.title = title;
+      if (!existing.imageUrl && imageUrl) existing.imageUrl = imageUrl;
+      return;
+    }
     byKey.set(product.productKey, {
       rank: byKey.size + 1,
       productKey: product.productKey,
@@ -636,29 +644,61 @@ function productIdentity(productUrl: string): { productKey: string; handle?: str
  */
 function findProductTitle($: CheerioAPI, el: Element): string | undefined {
   const link = $(el);
-  const fromLink =
-    cleanText(link.text()) ??
-    cleanText(link.attr("aria-label")) ??
-    cleanText(link.attr("title")) ??
-    cleanText(link.find("img").first().attr("alt"));
-  if (fromLink) return fromLink;
-
-  const card = link.closest("li, article, div, section");
+  const imageAlt = cleanText(link.find("img").first().attr("alt"));
+  const card = findProductCard($, el);
+  const cardDataTitle = cleanText(card.find("[data-product-title]").first().attr("data-product-title"));
   const heading = card
     .find("h2, h3, h4, [class*=title], [class*=name], [class*=Title], [class*=Name]")
     .first();
-  return cleanText(heading.text());
+  const headingText = cleanText(heading.text());
+  const fromLink =
+    cleanText(link.attr("data-product-title")) ??
+    cleanText(link.attr("aria-label")) ??
+    cleanText(link.attr("title")) ??
+    imageAlt ??
+    cardDataTitle ??
+    headingText ??
+    cleanText(link.text());
+  return fromLink;
 }
 
 function findNearestImageUrl($: CheerioAPI, el: Element, finalUrl: string): string | null {
   const link = $(el);
-  const candidates = [link.find("img").first(), link.closest("li, article, div, section").find("img").first()];
+  const candidates = [link.find("img").first(), findProductCard($, el).find("img").first()];
   for (const candidate of candidates) {
-    const raw = candidate.attr("src") ?? candidate.attr("data-src") ?? candidate.attr("data-original");
+    const raw =
+      candidate.attr("src") ??
+      candidate.attr("data-src") ??
+      candidate.attr("data-original") ??
+      firstSrcsetUrl(candidate.attr("srcset")) ??
+      firstSrcsetUrl(candidate.attr("data-srcset"));
     const normalized = raw ? normalizeMediaUrl(raw, finalUrl) : null;
     if (normalized) return normalized;
   }
   return null;
+}
+
+function findProductCard($: CheerioAPI, el: Element): Cheerio<Element> {
+  const link = $(el) as Cheerio<Element>;
+  const card = link.closest(
+    [
+      "li",
+      "article",
+      '[class*="product-card" i]',
+      '[class*="product-item" i]',
+      '[class*="grid-item" i]',
+      '[class*="card-product" i]',
+      '[class*="card" i]',
+    ].join(", "),
+  ) as Cheerio<Element>;
+  return card.length > 0 ? card : link;
+}
+
+function firstSrcsetUrl(srcset: string | undefined): string | undefined {
+  return srcset
+    ?.split(",")
+    .map((candidate) => candidate.trim().split(/\s+/)[0])
+    .find((candidate) => Boolean(candidate));
 }
 
 function normalizeMediaUrl(raw: string, baseUrl: string): string | null {
