@@ -11,7 +11,7 @@ import type {
 import { CheckError } from "../types/productCheck.js";
 import { assertDomainAllowed, validateAndNormalizeUrl } from "../utils/url.js";
 import { withBrowserSession } from "./pageLoader.js";
-import { buildRealisticHeaders, isBlockedResponse, proxyFetch } from "./antiBlock.js";
+import { buildRealisticHeaders, fetchDirect, isBlockedResponse, isProxyConfigured, proxyFetch } from "./antiBlock.js";
 import { crawlPages, resolveMaxPages } from "./pagination.js";
 import type { ProgressReporter } from "./progressHub.js";
 import {
@@ -228,60 +228,102 @@ async function extractFetchedHtmlListingItems(
 
   for (let page = 1; page <= maxPages && byKey.size < maxProducts; page++) {
     const pageUrl = buildPaginatedUrl(url, page);
-    let html: string;
     // Scrape exactly the URL that was requested — never the target of a redirect.
-    // `redirect: "manual"` makes a 3xx come back as a response we can inspect
-    // (instead of fetch silently following it to a canonical/other page), and we
-    // keep finalUrl pinned to the requested URL so links resolve against it.
+    // We keep finalUrl pinned to the requested URL so links resolve against it.
     const finalUrl = pageUrl;
-    try {
-      const response = await proxyFetch(pageUrl, {
-        headers: buildRealisticHeaders(url.origin),
-        redirect: "manual",
-      });
-      if (response.status >= 300 && response.status < 400) {
-        if (page === 1) {
-          warnings.push(
-            `Fetched HTML returned a redirect (HTTP ${response.status} → ${response.headers.get("location") ?? "unknown"}); ` +
-              "scraping only the requested URL, so the redirect was not followed.",
-          );
-        }
-        break;
-      }
-      if (!response.ok) {
-        if (page === 1) {
-          warnings.push(
-            isBlockedResponse(response.status, "", response.headers.get("server"))
-              ? `Fetched HTML blocked by bot protection (HTTP ${response.status}).`
-              : `Fetched HTML returned HTTP ${response.status}.`,
-          );
-        }
-        break;
-      }
-      html = await response.text();
-      if (isBlockedResponse(response.status, html, response.headers.get("server"))) {
-        if (page === 1) warnings.push("Fetched HTML returned a Cloudflare challenge; escalating.");
-        break;
-      }
-    } catch (err) {
-      if (page === 1) warnings.push(`Fetched HTML extraction failed: ${(err as Error).message}`);
+    const result = await fetchCollectionPageHtml(pageUrl, url.origin);
+    if (!result.ok) {
+      if (page === 1) warnings.push(result.warning);
       break;
     }
 
-    const $ = load(html);
+    const $ = load(result.html);
     const before = byKey.size;
     collectProductLinks($, finalUrl, byKey, maxProducts);
     if (byKey.size === before) break; // no new products → end of pagination
 
     progress?.({
       phase: "scanning-pages",
-      message: `Best-sellers (fetched HTML) — page ${page} · ${byKey.size} products`,
+      message: `Best-sellers (fetched HTML${result.viaDirect ? ", direct retry" : ""}) — page ${page} · ${byKey.size} products`,
       current: page,
       total: maxPages,
     });
   }
 
   return [...byKey.values()].map((item, index) => ({ ...item, rank: index + 1 }));
+}
+
+type CollectionPageFetch =
+  | { ok: true; html: string; viaDirect: boolean }
+  | { ok: false; warning: string };
+
+/**
+ * Fetch one collection page, retrying DIRECT (bypassing the proxy) when the
+ * proxied attempt is blocked by bot protection.
+ *
+ * Why this matters for best-selling order: the plain-fetch HTML is the ONLY tier
+ * that honors `?sort_by=best-selling` (products.json is unsorted). A shared /
+ * datacenter proxy exit IP is challenged by Cloudflare far more readily than the
+ * store's own origin IP, and a blocked HTML fetch silently demotes ranking to
+ * products.json's default order — so a best-selling listing comes back looking
+ * identical to the default order (observed on avelinethelabel.com: the proxy got
+ * a challenge, so "Men's Classic Jumper" — products.json #1 — outranked the real
+ * best-seller). Retrying direct recovers the real, correctly-sorted grid. We only
+ * retry on a BLOCK (not a redirect/HTTP error) and only when a proxy is actually
+ * in play, so the no-proxy and happy paths are unchanged.
+ *
+ * `redirect: "manual"` makes a 3xx come back as an inspectable response instead
+ * of fetch silently following it to a canonical/other page.
+ */
+export async function fetchCollectionPageHtml(pageUrl: string, origin: string): Promise<CollectionPageFetch> {
+  const init: RequestInit = { headers: buildRealisticHeaders(origin), redirect: "manual" };
+
+  type Attempt =
+    | { ok: true; html: string }
+    | { ok: false; blocked: boolean; warning: string };
+
+  const attempt = async (fetcher: typeof proxyFetch): Promise<Attempt> => {
+    try {
+      const response = await fetcher(pageUrl, init);
+      if (response.status >= 300 && response.status < 400) {
+        return {
+          ok: false,
+          blocked: false,
+          warning:
+            `Fetched HTML returned a redirect (HTTP ${response.status} → ${response.headers.get("location") ?? "unknown"}); ` +
+            "scraping only the requested URL, so the redirect was not followed.",
+        };
+      }
+      if (!response.ok) {
+        const blocked = isBlockedResponse(response.status, "", response.headers.get("server"));
+        return {
+          ok: false,
+          blocked,
+          warning: blocked
+            ? `Fetched HTML blocked by bot protection (HTTP ${response.status}).`
+            : `Fetched HTML returned HTTP ${response.status}.`,
+        };
+      }
+      const html = await response.text();
+      if (isBlockedResponse(response.status, html, response.headers.get("server"))) {
+        return { ok: false, blocked: true, warning: "Fetched HTML returned a Cloudflare challenge; escalating." };
+      }
+      return { ok: true, html };
+    } catch (err) {
+      return { ok: false, blocked: false, warning: `Fetched HTML extraction failed: ${(err as Error).message}` };
+    }
+  };
+
+  const proxied = await attempt(proxyFetch);
+  if (proxied.ok) return { ok: true, html: proxied.html, viaDirect: false };
+
+  // Only a BLOCK is worth retrying direct, and only when the first attempt
+  // actually used a proxy IP (otherwise a direct retry just hits the same wall).
+  if (proxied.blocked && isProxyConfigured()) {
+    const direct = await attempt(fetchDirect);
+    if (direct.ok) return { ok: true, html: direct.html, viaDirect: true };
+  }
+  return { ok: false, warning: proxied.warning };
 }
 
 /**

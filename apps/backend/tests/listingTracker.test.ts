@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { extractListingItems } from "../src/services/listingTracker.js";
+import { extractListingItems, fetchCollectionPageHtml } from "../src/services/listingTracker.js";
 
 /** A Shopify-style collection page with products already in best-selling order. */
 function collectionHtml(handles: string[]): string {
@@ -180,6 +180,104 @@ describe("extractListingItems — ranks the real grid, not menu/upsell links", (
     expect(sorted.items[0]?.handle).toBe("best-1");
     expect(def.items[0]?.handle).toBe("alpha");
     expect(sorted.items[0]?.handle).not.toBe(def.items[0]?.handle);
+  });
+});
+
+describe("extractListingItems — retries DIRECT when the proxied HTML fetch is blocked", () => {
+  const ORIGINAL_PROXY = process.env.SCRAPE_PROXY_URL;
+  afterEach(() => {
+    if (ORIGINAL_PROXY === undefined) delete process.env.SCRAPE_PROXY_URL;
+    else process.env.SCRAPE_PROXY_URL = ORIGINAL_PROXY;
+  });
+
+  it("recovers the sorted grid when the proxy IP is challenged (Cloudflare) but the origin IP isn't", async () => {
+    // With a proxy configured, the first (proxied) attempt at page 1 is blocked;
+    // the code must retry DIRECT and use that correctly-sorted grid — not silently
+    // fall back to products.json's default order.
+    process.env.SCRAPE_PROXY_URL = "http://user:pass@127.0.0.1:9";
+    const sorted = ["best-seller", "second", "third"];
+    let page1Attempts = 0;
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const u = new URL(input.toString());
+      // products.json (the unsorted fallback) returns the DEFAULT order — if the
+      // direct retry didn't work, this is what we'd wrongly rank by.
+      if (u.pathname.endsWith("/products.json")) {
+        const products =
+          Number(u.searchParams.get("page") ?? "1") === 1
+            ? [{ id: 9, handle: "default-first", title: "Default First" }]
+            : [];
+        const res = jsonResponse({ products });
+        Object.defineProperty(res, "url", { value: u.toString() });
+        return res;
+      }
+      const page = Number(u.searchParams.get("page") ?? "1");
+      if (page === 1) {
+        page1Attempts += 1;
+        // 1st hit = proxied attempt → Cloudflare 403 block; 2nd hit = direct retry → real grid.
+        if (page1Attempts === 1) {
+          const blocked = new Response("blocked", { status: 403, headers: { server: "cloudflare" } });
+          Object.defineProperty(blocked, "url", { value: u.toString() });
+          return blocked;
+        }
+        const res = new Response(collectionHtml(sorted), { status: 200, headers: { "content-type": "text/html" } });
+        Object.defineProperty(res, "url", { value: u.toString() });
+        return res;
+      }
+      const res = new Response("<html><body></body></html>", { status: 200, headers: { "content-type": "text/html" } });
+      Object.defineProperty(res, "url", { value: u.toString() });
+      return res;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const url = new URL("https://shop.example/collections/all?sort_by=best-selling");
+    const result = await extractListingItems(url, "auto", 100, 3);
+
+    expect(page1Attempts).toBeGreaterThanOrEqual(2); // proxied block + direct retry
+    expect(result.rawMetadata.orderReliable).toBe(true);
+    expect(result.items[0]?.handle).toBe("best-seller");
+    expect(result.items.map((i) => i.handle)).toEqual(sorted);
+    expect(result.items.map((i) => i.handle)).not.toContain("default-first");
+  });
+
+  it("does NOT retry the blocked fetch when no proxy is configured (a direct retry would hit the same wall)", async () => {
+    delete process.env.SCRAPE_PROXY_URL;
+    let attempts = 0;
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      attempts += 1;
+      const res = new Response("blocked", { status: 403, headers: { server: "cloudflare" } });
+      Object.defineProperty(res, "url", { value: input.toString() });
+      return res;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchCollectionPageHtml("https://shop.example/collections/all?sort_by=best-selling", "https://shop.example");
+
+    expect(result.ok).toBe(false);
+    expect(attempts).toBe(1); // blocked once, no direct retry without a proxy
+  });
+
+  it("DOES retry direct on a block when a proxy is configured, and surfaces the recovered HTML", async () => {
+    process.env.SCRAPE_PROXY_URL = "http://user:pass@127.0.0.1:9";
+    let attempts = 0;
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      attempts += 1;
+      const res =
+        attempts === 1
+          ? new Response("blocked", { status: 403, headers: { server: "cloudflare" } })
+          : new Response("<html><body><ul class='grid'><li><a href='/products/x'>x</a></li></ul></body></html>", {
+              status: 200,
+              headers: { "content-type": "text/html" },
+            });
+      Object.defineProperty(res, "url", { value: input.toString() });
+      return res;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchCollectionPageHtml("https://shop.example/collections/all?sort_by=best-selling", "https://shop.example");
+
+    expect(attempts).toBe(2); // proxied block → direct retry
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.viaDirect).toBe(true);
   });
 });
 

@@ -173,6 +173,11 @@ export function isProxyHealthy(): boolean {
   return PROXY_ROTATING || Date.now() >= proxyDisabledUntil;
 }
 
+/** Whether a proxy is configured at all (independent of the cooldown window). */
+export function isProxyConfigured(): boolean {
+  return getProxyConfig() !== null;
+}
+
 /** Skip the proxy (go direct) for the cooldown window, then it auto-retries. */
 export function markProxyUnhealthy(context: string, detail?: string): void {
   const wasHealthy = isProxyHealthy();
@@ -208,6 +213,16 @@ async function getProxyDispatcher(): Promise<unknown | null> {
 
 const PROXY_FETCH_TIMEOUT_MS =
   Number(process.env.PROXY_FETCH_TIMEOUT_MS) > 0 ? Number(process.env.PROXY_FETCH_TIMEOUT_MS) : 25_000;
+
+/**
+ * Plain DIRECT fetch (never routed through the proxy), time-boxed like
+ * {@link proxyFetch}. Used to retry a request from the origin's own IP when the
+ * proxy exit IP is blocked — shared/datacenter proxy IPs are challenged by
+ * Cloudflare far more often than a store's own server IP.
+ */
+export async function fetchDirect(input: string, init?: RequestInit): Promise<Response> {
+  return fetchWithTimeout(input, init, PROXY_FETCH_TIMEOUT_MS);
+}
 
 /** fetch() with a hard timeout so a hanging connection can't stall a request forever. */
 async function fetchWithTimeout(input: string, init: RequestInit | undefined, timeoutMs: number): Promise<Response> {
