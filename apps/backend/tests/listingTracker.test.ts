@@ -146,6 +146,128 @@ describe("extractListingItems — plain-fetch HTML tier (auto)", () => {
       1,
     );
     expect(result.items[0]?.title).toBe("H.D Balboa Shorts");
+    // titleSeo keeps the raw storefront/SEO-flavored title for the toggle.
+    expect(result.items[0]?.titleSeo).toBe("H.D Balboa Shorts - Handsome Dans");
+  });
+
+  it("populates titleSeo from the product title when the grid has no distinct title", async () => {
+    // products.json-enriched item whose HTML grid title equals the canonical one:
+    // titleSeo must still be present (falls back to the product title) so the
+    // toggle never yields an empty value.
+    const html = `<html><body><ul id="product-grid">
+      <li class="card"><a href="/products/p1"><img src="/p1.jpg"></a></li>
+    </ul></body></html>`;
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const u = new URL(input.toString());
+      if (u.pathname.endsWith("/products.json")) {
+        const products =
+          Number(u.searchParams.get("page") ?? "1") === 1
+            ? [{ id: 1, handle: "p1", title: "Linen Shirt" }]
+            : [];
+        const res = jsonResponse({ products });
+        Object.defineProperty(res, "url", { value: u.toString() });
+        return res;
+      }
+      const page = Number(u.searchParams.get("page") ?? "1");
+      const res = new Response(page === 1 ? html : "<html><body></body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+      Object.defineProperty(res, "url", { value: u.toString() });
+      return res;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await extractListingItems(
+      new URL("https://shop.example/collections/all?sort_by=best-selling"),
+      "auto",
+      100,
+      1,
+    );
+    expect(result.items[0]?.title).toBe("Linen Shirt");
+    expect(result.items[0]?.titleSeo).toBe("Linen Shirt");
+  });
+
+  it("enriches a best-seller that lives on a later products.json page (full index)", async () => {
+    // The best-seller's handle is NOT among the first products.json page in default
+    // order — it's on page 2. The enrichment index must page past maxProducts to
+    // find it; otherwise productId/canonical title silently never land.
+    const htmlGrid = `<ul id="product-grid"><li class="card"><a href="/products/target"><img src="/t.jpg"></a></li></ul>`;
+    const page1 = Array.from({ length: 250 }, (_, i) => ({ id: 1000 + i, handle: `filler-${i}`, title: `Filler ${i}` }));
+    const page2 = [{ id: 9999, handle: "target", title: "Canonical Target Title" }];
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const u = new URL(input.toString());
+      if (u.pathname.endsWith("/products.json")) {
+        const page = Number(u.searchParams.get("page") ?? "1");
+        const products = page === 1 ? page1 : page === 2 ? page2 : [];
+        const res = jsonResponse({ products });
+        Object.defineProperty(res, "url", { value: u.toString() });
+        return res;
+      }
+      const page = Number(u.searchParams.get("page") ?? "1");
+      const res = new Response(page === 1 ? `<html><body>${htmlGrid}</body></html>` : "<html><body></body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+      Object.defineProperty(res, "url", { value: u.toString() });
+      return res;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // maxProducts=10 would have stopped the old index inside page 1, never reaching `target`.
+    const result = await extractListingItems(
+      new URL("https://shop.example/collections/all?sort_by=best-selling"),
+      "auto",
+      10,
+      5,
+    );
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.handle).toBe("target");
+    expect(result.items[0]?.title).toBe("Canonical Target Title");
+    expect(result.items[0]?.productId).toBe("9999");
+    expect(result.items[0]?.source).toBe("both");
+  });
+
+  it("decodes a percent-encoded handle so it stays clean and matches products.json", async () => {
+    // boutique-elegance: grid href is /products/akrisna%E2%84%A2-bra, products.json
+    // reports the decoded handle "akrisna™-bra". The decoded form must be the key
+    // (so they match + enrich), while the url field stays percent-encoded.
+    const html = `<html><body><ul id="product-grid">
+      <li class="card"><a href="/products/akrisna%E2%84%A2-bra"><img src="/a.jpg"></a></li>
+    </ul></body></html>`;
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const u = new URL(input.toString());
+      if (u.pathname.endsWith("/products.json")) {
+        const products =
+          Number(u.searchParams.get("page") ?? "1") === 1
+            ? [{ id: 55, handle: "akrisna™-bra", title: "Akrisna Bra" }]
+            : [];
+        const res = jsonResponse({ products });
+        Object.defineProperty(res, "url", { value: u.toString() });
+        return res;
+      }
+      const page = Number(u.searchParams.get("page") ?? "1");
+      const res = new Response(page === 1 ? html : "<html><body></body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+      Object.defineProperty(res, "url", { value: u.toString() });
+      return res;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await extractListingItems(
+      new URL("https://shop.example/collections/all?sort_by=best-selling"),
+      "auto",
+      100,
+      1,
+    );
+    expect(result.items[0]?.handle).toBe("akrisna™-bra");
+    expect(result.items[0]?.productKey).toBe("handle:akrisna™-bra");
+    expect(result.items[0]?.url).toContain("akrisna%E2%84%A2-bra"); // url stays encoded
+    expect(result.items[0]?.title).toBe("Akrisna Bra"); // enrichment matched on the decoded handle
+    expect(result.items[0]?.productId).toBe("55");
+    expect(result.items[0]?.source).toBe("both");
   });
 
   it("strips the store-name suffix from an HTML-only title (og:site_name)", async () => {
@@ -202,6 +324,85 @@ describe("extractListingItems — plain-fetch HTML tier (auto)", () => {
     expect(result.items).toHaveLength(1);
     expect(result.items[0]?.title).toBe("Image Alt Title One");
     expect(result.items[0]?.imageUrl).toBe("https://cdn.shop.example/p1_800x.jpg");
+  });
+
+  it("canonicalizes collection-scoped grid links to /products/<handle>", async () => {
+    // Some themes (handsomedans, arlento, …) render product links scoped under
+    // the collection: /collections/all/products/<handle>. The canonical product
+    // URL is /products/<handle>; the collection prefix must be stripped.
+    const html = `<html><body><ul class="grid">
+      <li class="card"><a href="/collections/all/products/balboa"><img src="/b.jpg"><span>Balboa</span></a></li>
+      <li class="card"><a href="/collections/best-sellers/products/eden/"><img src="/e.jpg"><span>Eden</span></a></li>
+    </ul></body></html>`;
+    fetchHtmlPage1(html);
+
+    const result = await extractListingItems(
+      new URL("https://shop.example/collections/all?sort_by=best-selling"),
+      "html",
+      100,
+      1,
+    );
+    expect(result.items.map((i) => i.url)).toEqual([
+      "https://shop.example/products/balboa",
+      "https://shop.example/products/eden",
+    ]);
+    expect(result.items.map((i) => i.handle)).toEqual(["balboa", "eden"]);
+  });
+
+  it("preserves a locale prefix while stripping the collection scope", async () => {
+    // deloxusa-style: /fr-fr/collections/all/products/<handle> → /fr-fr/products/<handle>.
+    const html = `<html><body><ul class="grid">
+      <li class="card"><a href="/fr-fr/collections/all/products/hoodie"><img src="/h.jpg"><span>Hoodie</span></a></li>
+    </ul></body></html>`;
+    fetchHtmlPage1(html);
+
+    const result = await extractListingItems(
+      new URL("https://shop.example/fr-fr/collections/all?sort_by=best-selling"),
+      "html",
+      100,
+      1,
+    );
+    expect(result.items[0]?.url).toBe("https://shop.example/fr-fr/products/hoodie");
+    expect(result.items[0]?.handle).toBe("hoodie");
+  });
+
+  it("keys identity on handle even when products.json enrichment supplies a productId", async () => {
+    // The productId must NOT be promoted into productKey: a product that gains or
+    // loses its id between runs (flaky/blocked products.json) would otherwise flip
+    // identity and show up as both `missing` and `new`. Key stays handle:<handle>.
+    const html = `<html><body><ul id="product-grid">
+      <li class="card"><a href="/products/balboa"><img src="/b.jpg"><span>Balboa</span></a></li>
+    </ul></body></html>`;
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const u = new URL(input.toString());
+      if (u.pathname.endsWith("/products.json")) {
+        const products =
+          Number(u.searchParams.get("page") ?? "1") === 1
+            ? [{ id: 99887766, handle: "balboa", title: "H.D Balboa Shorts" }]
+            : [];
+        const res = jsonResponse({ products });
+        Object.defineProperty(res, "url", { value: u.toString() });
+        return res;
+      }
+      const page = Number(u.searchParams.get("page") ?? "1");
+      const res = new Response(page === 1 ? html : "<html><body></body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+      Object.defineProperty(res, "url", { value: u.toString() });
+      return res;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await extractListingItems(
+      new URL("https://shop.example/collections/all?sort_by=best-selling"),
+      "auto",
+      100,
+      1,
+    );
+    expect(result.items[0]?.productKey).toBe("handle:balboa");
+    expect(result.items[0]?.productId).toBe("99887766"); // id kept as an attribute
+    expect(result.items[0]?.source).toBe("both");
   });
 });
 

@@ -26,6 +26,7 @@ type SnapshotItemRow = {
   handle: string | null;
   url: string;
   title: string | null;
+  title_seo: string | null;
   image_url: string | null;
   source: ListingSourceUsed;
 };
@@ -84,7 +85,7 @@ export async function getLatestSnapshot(
   if (!row) return null;
 
   const items = await query<SnapshotItemRow>(
-    `select snapshot_id, rank, product_key, product_id, handle, url, title, image_url, source
+    `select snapshot_id, rank, product_key, product_id, handle, url, title, title_seo, image_url, source
      from listing_snapshot_items
      where snapshot_id = $1
      order by rank asc`,
@@ -153,7 +154,7 @@ export async function getLatestSnapshots(
 
 export async function getSnapshotItems(snapshotId: string): Promise<ListingRankItem[]> {
   const items = await query<SnapshotItemRow>(
-    `select snapshot_id, rank, product_key, product_id, handle, url, title, image_url, source
+    `select snapshot_id, rank, product_key, product_id, handle, url, title, title_seo, image_url, source
      from listing_snapshot_items
      where snapshot_id = $1
      order by rank asc`,
@@ -200,9 +201,10 @@ export async function createSnapshot(input: {
          handle,
          url,
          title,
+         title_seo,
          image_url,
          source
-       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         id,
         item.rank,
@@ -211,6 +213,7 @@ export async function createSnapshot(input: {
         item.handle ?? null,
         item.url,
         item.title ?? null,
+        item.titleSeo ?? null,
         item.imageUrl ?? null,
         item.source,
       ],
@@ -252,6 +255,7 @@ function rowToItem(row: SnapshotItemRow): ListingRankItem {
     url: row.url,
     ...(row.handle ? { handle: row.handle } : {}),
     ...(row.title ? { title: row.title } : {}),
+    ...(row.title_seo ? { titleSeo: row.title_seo } : {}),
     ...(row.image_url ? { imageUrl: row.image_url } : {}),
     ...(row.product_id ? { productId: row.product_id } : {}),
     source: row.source,

@@ -12,7 +12,7 @@ export async function runMigrations(): Promise<void> {
     applied_at timestamptz not null default now()
   )`);
 
-  const migrations = ["001_listing_tracker.sql"];
+  const migrations = ["001_listing_tracker.sql", "002_title_seo.sql"];
   const migrationsDir = path.dirname(fileURLToPath(import.meta.url));
 
   for (const migration of migrations) {

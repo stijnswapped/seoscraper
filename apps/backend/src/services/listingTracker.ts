@@ -139,7 +139,11 @@ export async function extractListingItems(
 
   const fetchHtml = () => extractFetchedHtmlListingItems(url, maxProducts, maxPages, progress, warnings);
   const browserHtml = () => extractHtmlListingItems(url, maxProducts, maxPages, progress, warnings);
+  // Ranking source: capped at maxProducts (order matters). Enrichment index:
+  // full feed (bounded by maxPages) so every best-selling handle can be matched.
   const shopifyJson = () => extractShopifyListingItems(url, maxProducts, maxPages, progress, warnings);
+  const shopifyIndex = () =>
+    extractShopifyListingItems(url, maxProducts, maxPages, progress, warnings, SHOPIFY_ENRICHMENT_INDEX_CAP);
 
   // Some stores IP-cloak: a "bad" exit IP is redirected away from the collection
   // (e.g. laurence-boutique.fr → /search), so the browser renders zero products
@@ -182,7 +186,9 @@ export async function extractListingItems(
   // order is reliable; json only fills display fields.
   let htmlItems = await fetchHtml();
   if (htmlItems.length === 0) htmlItems = await browserHtmlWithRetry();
-  const shopifyItems = await shopifyJson();
+  // Full products.json index (not maxProducts-capped) so enrichment reaches
+  // best-sellers that sit on later default-order pages of large catalogs.
+  const shopifyItems = await shopifyIndex();
   const orderReliable = htmlItems.length > 0 || !hasSortBy;
   if (hasSortBy && htmlItems.length === 0 && shopifyItems.length > 0) warnings.push(ORDER_UNRELIABLE_WARNING);
   return {
@@ -273,6 +279,15 @@ type CollectionPageFetch =
 
 /** Max redirect hops to follow before giving up (guards against loops). */
 const MAX_SAFE_REDIRECTS = 4;
+/**
+ * Upper bound on how many products.json entries to pull when building the
+ * enrichment index (title/image/productId by handle) for the merge path. Unlike
+ * the ranking cap (maxProducts), the index must cover EVERY best-selling handle
+ * — which, on large stores, sit on later products.json pages in default order —
+ * so it's intentionally generous. Still bounded by maxPages, and the feed ends
+ * early when a page returns < 250.
+ */
+const SHOPIFY_ENRICHMENT_INDEX_CAP = 2000;
 /**
  * Extra browser retries after the first empty render when we're on a rotating
  * proxy pool. Each retry gets a fresh exit IP, which can recover a cloaked
@@ -482,7 +497,10 @@ function collectProductLinks(
     if (!productUrl) return;
     const product = productIdentity(productUrl);
     if (isJunkProductHandle(product.handle)) return; // cart add-ons / gift cards aren't ranked
-    const title = stripSiteSuffix(findProductTitle($, el), siteName);
+    // titleSeo = the raw storefront title (with any store-name suffix); title =
+    // the same title with the suffix stripped (the clean product name).
+    const titleSeo = findProductTitle($, el);
+    const title = stripSiteSuffix(titleSeo, siteName);
     const imageUrl = findNearestImageUrl($, el, finalUrl);
     const existing = byKey.get(product.productKey);
     if (existing) {
@@ -490,6 +508,7 @@ function collectProductLinks(
       // same product. Keep the first rank, but let later duplicate anchors fill
       // in better display fields.
       if (!existing.title && title) existing.title = title;
+      if (!existing.titleSeo && titleSeo) existing.titleSeo = titleSeo;
       if (!existing.imageUrl && imageUrl) existing.imageUrl = imageUrl;
       return;
     }
@@ -499,6 +518,7 @@ function collectProductLinks(
       url: productUrl,
       ...(product.handle ? { handle: product.handle } : {}),
       ...(title ? { title } : {}),
+      ...(titleSeo ? { titleSeo } : {}),
       ...(imageUrl ? { imageUrl } : {}),
       source: "html",
     });
@@ -544,10 +564,17 @@ function collectShopifyCollectionViewProducts(
       const imageUrl = normalizeImageUrl(asString(variant.image?.src), finalUrl);
       byKey.set(product.productKey, {
         rank: byKey.size + 1,
-        productKey: productId ? `shopify:${productId}` : product.productKey,
+        // Identity is always the stable handle key (productIdentity). The Shopify
+        // productId is kept as an attribute only — never promoted into the key —
+        // so a product never changes identity between runs based on whether its id
+        // happened to be discoverable. See mergeListingItems.
+        productKey: product.productKey,
         url: productUrl,
         ...(product.handle ? { handle: product.handle } : {}),
         ...(title ? { title } : {}),
+        // The pixel exposes only the product title — no distinct SEO form — so
+        // mirror it into titleSeo to keep the field populated for the toggle.
+        ...(title ? { titleSeo: title } : {}),
         ...(imageUrl ? { imageUrl } : {}),
         ...(productId ? { productId } : {}),
         source: "html",
@@ -604,6 +631,10 @@ async function extractShopifyListingItems(
   maxPages: number,
   progress: ProgressReporter | undefined,
   warnings: string[],
+  // How many entries to collect. Defaults to the ranking cap (maxProducts) for
+  // the standalone shopify_json source; the merge path passes a large cap so the
+  // enrichment index covers best-sellers that live on later default-order pages.
+  itemCap: number = maxProducts,
 ): Promise<ListingRankItem[]> {
   const collectionPath = getShopifyCollectionPath(url);
   if (!collectionPath) return [];
@@ -611,7 +642,7 @@ async function extractShopifyListingItems(
   const items: ListingRankItem[] = [];
   const seen = new Set<string>();
 
-  for (let page = 1; page <= maxPages && items.length < maxProducts; page++) {
+  for (let page = 1; page <= maxPages && items.length < itemCap; page++) {
     const endpoint = `${url.origin}${collectionPath}/products.json?limit=250&page=${page}`;
     let products: unknown;
     let redirected = false;
@@ -663,14 +694,16 @@ async function extractShopifyListingItems(
     if (!Array.isArray(products) || products.length === 0) break;
 
     for (const product of products) {
-      if (items.length >= maxProducts || !product || typeof product !== "object") break;
+      if (items.length >= itemCap || !product || typeof product !== "object") break;
       const obj = product as ShopifyProductJson;
       const handle = asString(obj.handle);
       if (!handle) continue;
       if (isJunkProductHandle(handle)) continue; // cart add-ons / gift cards aren't ranked
       const productUrl = new URL(`/products/${handle}`, url.origin).toString();
       const productId = asString(obj.id);
-      const productKey = productId ? `shopify:${productId}` : `handle:${handle.toLowerCase()}`;
+      // Stable identity = handle key; productId is carried as an attribute only
+      // (kept consistent with the HTML and merge paths to avoid identity churn).
+      const productKey = `handle:${handle.toLowerCase()}`;
       if (seen.has(productKey)) continue;
       seen.add(productKey);
       const title = asString(obj.title);
@@ -681,6 +714,9 @@ async function extractShopifyListingItems(
         url: productUrl,
         handle,
         ...(title ? { title } : {}),
+        // products.json has no SEO title; mirror the product title so the toggle
+        // field stays populated even on the products.json-only fallback path.
+        ...(title ? { titleSeo: title } : {}),
         ...(imageUrl ? { imageUrl } : {}),
         ...(productId ? { productId } : {}),
         source: "shopify_json",
@@ -708,12 +744,19 @@ function mergeListingItems(htmlItems: ListingRankItem[], shopifyItems: ListingRa
     return {
       ...item,
       rank: index + 1,
-      productKey: enrichment?.productId ? `shopify:${enrichment.productId}` : item.productKey,
+      // Keep the stable handle key. Enrichment only fills display/attribute fields
+      // (title/image/productId); it never changes identity, so a product can't flip
+      // between `handle:` and `shopify:` keys when products.json is flaky/blocked.
+      productKey: item.productKey,
       // Prefer products.json's canonical product title over the HTML-scraped one:
       // the JSON `title` is the authoritative product name, while themes often
       // expose an SEO-flavored `img alt` like "H.D Balboa Shorts - Handsome Dans"
       // (store-name suffix). HTML title is kept only when there's no JSON match.
       title: enrichment?.title ?? item.title,
+      // titleSeo keeps the storefront/SEO-flavored grid title (the toggle target).
+      // Fall back to the canonical title so the field is never empty when a title
+      // exists — e.g. products.json-only items that had no HTML grid title.
+      titleSeo: item.titleSeo ?? enrichment?.title ?? item.title,
       imageUrl: item.imageUrl ?? enrichment?.imageUrl,
       productId: enrichment?.productId ?? item.productId,
       source: enrichment ? "both" : item.source,
@@ -814,19 +857,50 @@ function normalizeProductUrl(rawHref: string, baseUrl: string): string | null {
   const base = new URL(baseUrl);
   if (url.protocol !== "http:" && url.protocol !== "https:") return null;
   if (url.hostname.toLowerCase() !== base.hostname.toLowerCase()) return null;
-  const match = url.pathname.match(/^(.*?\/products\/[^/?#]+)/i);
-  if (!match?.[1]) return null;
-  url.pathname = match[1].replace(/\/+$/, "");
+  // Collapse a collection-scoped link (`/collections/all/products/<handle>`, which
+  // some themes render in the grid) down to the canonical `/products/<handle>`.
+  // A leading Shopify locale segment (`/en-us`, `/fr-fr`, …) is preserved so the
+  // URL still points at the localized storefront the shopper actually sees.
+  const handleMatch = url.pathname.match(/\/products\/([^/?#]+)/i);
+  if (!handleMatch?.[1]) return null;
+  const handle = handleMatch[1].replace(/\/+$/, "");
+  const localePrefix = getLocalePrefix(url.pathname);
+  url.pathname = `${localePrefix}/products/${handle}`;
   url.search = "";
   url.hash = "";
   return url.toString();
 }
 
+/**
+ * A leading Shopify locale path segment — a 2-letter language optionally followed
+ * by a 2-letter country (`/en`, `/fr-fr`, `/nl-nl`). Returns "" when the path has
+ * no locale prefix. `/collections` and `/products` can never match (too long), so
+ * a real first segment is never mistaken for a locale.
+ */
+function getLocalePrefix(pathname: string): string {
+  const match = pathname.match(/^\/([a-z]{2}(?:-[a-z]{2})?)(?=\/)/i);
+  return match?.[1] ? `/${match[1].toLowerCase()}` : "";
+}
+
 function productIdentity(productUrl: string): { productKey: string; handle?: string } {
   const url = new URL(productUrl);
   const match = url.pathname.match(/\/products\/([^/?#]+)/i);
-  const handle = match?.[1]?.toLowerCase();
+  // Decode the handle so a percent-encoded URL segment (e.g. "akrisna%E2%84%A2-…")
+  // becomes the same readable form products.json reports ("akrisna™-…"). This keeps
+  // the `handle` field clean AND lets enrichment match by handle (the encoded vs
+  // decoded mismatch otherwise silently skipped these products). The `url` field
+  // stays percent-encoded — only the identity/display handle is decoded.
+  const handle = match?.[1] ? decodeHandle(match[1]).toLowerCase() : undefined;
   return handle ? { productKey: `handle:${handle}`, handle } : { productKey: productUrl };
+}
+
+/** decodeURIComponent, but never throws on a malformed `%` sequence. */
+function decodeHandle(rawHandle: string): string {
+  try {
+    return decodeURIComponent(rawHandle);
+  } catch {
+    return rawHandle;
+  }
 }
 
 /**

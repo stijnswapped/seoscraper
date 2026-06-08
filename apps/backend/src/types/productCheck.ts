@@ -169,6 +169,14 @@ export interface ListingRankItem {
   url: string;
   handle?: string;
   title?: string;
+  /**
+   * The SEO-flavored title as the storefront grid renders it (theme img-alt /
+   * heading, e.g. "H.D Balboa Shorts - Handsome Dans"), before the store-name
+   * suffix is stripped. `title` is the canonical product name; `titleSeo` lets a
+   * consumer toggle to the storefront/SEO form. Falls back to `title` when the
+   * grid exposes no distinct title (products.json- or pixel-sourced items).
+   */
+  titleSeo?: string;
   imageUrl?: string;
   productId?: string;
   source: ListingSourceUsed;

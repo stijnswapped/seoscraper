@@ -37,10 +37,15 @@ ListingRankDirection  = "up" | "down" | "same" | "new" | "missing"
 
 ListingRankItem = {
   rank: number            // 1-based position in best-selling order
-  productKey: string      // STABLE identity. "shopify:<productId>" or "handle:<handle>". Match on this.
+  productKey: string      // STABLE identity. Always "handle:<handle>". Match on this.
+                          // (productId, when known, is a separate attribute below — NOT the key.)
   url: string             // canonical product URL
   handle?: string         // Shopify product handle (slug)
-  title?: string          // product title (display only; may change between runs)
+  title?: string          // canonical product title (display only; may change between runs)
+  titleSeo?: string       // storefront/SEO-flavored title as the grid renders it, e.g.
+                          //   "H.D Balboa Shorts - Handsome Dans" (store-name suffix kept).
+                          //   Toggle target vs `title`; falls back to `title` when the grid
+                          //   exposes no distinct title. Display only.
   imageUrl?: string       // first/main product image URL
   productId?: string      // Shopify numeric product id (when known)
   source: ListingSourceUsed
@@ -157,8 +162,9 @@ content-type: application/json
     "items": [
       {
         "rank": 1,
-        "productKey": "shopify:14852450484549",
+        "productKey": "handle:du-wirst-immer-beschutzt-sein-boser-blick-halskette",
         "title": "\"Du wirst immer beschützt sein\" - Böser Blick Halskette",
+        "titleSeo": "\"Du wirst immer beschützt sein\" - Böser Blick Halskette",
         "imageUrl": "https://hausofmode.de/cdn/shop/files/xxx.jpg",
         "url": "https://hausofmode.de/products/du-wirst-immer-beschutzt-sein-boser-blick-halskette",
         "handle": "du-wirst-immer-beschutzt-sein-boser-blick-halskette",
@@ -168,7 +174,7 @@ content-type: application/json
     ],
     "changes": [
       {
-        "productKey": "shopify:14852450484549",
+        "productKey": "handle:du-wirst-immer-beschutzt-sein-boser-blick-halskette",
         "title": "\"Du wirst immer beschützt sein\" - Böser Blick Halskette",
         "url": "https://hausofmode.de/products/du-wirst-immer-beschutzt-sein-boser-blick-halskette",
         "handle": "du-wirst-immer-beschutzt-sein-boser-blick-halskette",
