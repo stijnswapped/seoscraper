@@ -5,6 +5,8 @@ import {
   assertDomainAllowed,
   normalizeImageUrl,
   parseSrcset,
+  stripLocalePrefix,
+  safeCollectionRedirectTarget,
 } from "../src/utils/url.js";
 import { CheckError } from "../src/types/productCheck.js";
 
@@ -87,5 +89,70 @@ describe("parseSrcset", () => {
   it("extracts URLs and drops descriptors", () => {
     const urls = parseSrcset("a.jpg 1x, b.jpg 2x, c.jpg 800w");
     expect(urls).toEqual(["a.jpg", "b.jpg", "c.jpg"]);
+  });
+});
+
+describe("stripLocalePrefix", () => {
+  it("removes a {lang} or {lang}-{region} leading segment", () => {
+    expect(stripLocalePrefix("/en-us/collections/all")).toBe("/collections/all");
+    expect(stripLocalePrefix("/fr-fr/collections/all")).toBe("/collections/all");
+    expect(stripLocalePrefix("/nl/products/x")).toBe("/products/x");
+  });
+  it("leaves non-locale paths unchanged", () => {
+    expect(stripLocalePrefix("/collections/all")).toBe("/collections/all");
+    // 'co' is two letters but the real first segment is 'collections' here.
+    expect(stripLocalePrefix("/products/handle")).toBe("/products/handle");
+  });
+});
+
+describe("safeCollectionRedirectTarget", () => {
+  const req = "https://shop.example/collections/all?sort_by=best-selling";
+
+  it("follows a locale-prefixed copy of the same collection (preserving sort)", () => {
+    expect(safeCollectionRedirectTarget(req, "https://shop.example/en-us/collections/all?sort_by=best-selling")).toBe(
+      "https://shop.example/en-us/collections/all?sort_by=best-selling",
+    );
+  });
+
+  it("follows a www. canonicalization of the same collection", () => {
+    expect(safeCollectionRedirectTarget(req, "https://www.shop.example/collections/all?sort_by=best-selling")).toBe(
+      "https://www.shop.example/collections/all?sort_by=best-selling",
+    );
+  });
+
+  it("re-applies a dropped sort_by on the redirect target", () => {
+    expect(safeCollectionRedirectTarget(req, "https://www.shop.example/collections/all")).toBe(
+      "https://www.shop.example/collections/all?sort_by=best-selling",
+    );
+  });
+
+  it("re-applies sort on a locale + dropped-sort redirect (e.g. vitellimoda/www markets)", () => {
+    expect(safeCollectionRedirectTarget(req, "https://shop.example/fr-fr/collections/all")).toBe(
+      "https://shop.example/fr-fr/collections/all?sort_by=best-selling",
+    );
+  });
+
+  it("follows the products.json variant of the same collection", () => {
+    const jsonReq = "https://shop.example/collections/all/products.json?limit=250&page=1";
+    expect(safeCollectionRedirectTarget(jsonReq, "https://shop.example/en-us/collections/all/products.json?limit=250&page=1")).toBe(
+      "https://shop.example/en-us/collections/all/products.json?limit=250&page=1",
+    );
+  });
+
+  it("rejects a redirect to a DIFFERENT collection handle", () => {
+    expect(safeCollectionRedirectTarget(req, "https://shop.example/collections/sale?sort_by=best-selling")).toBeNull();
+  });
+
+  it("rejects a redirect to a different host/domain", () => {
+    expect(safeCollectionRedirectTarget(req, "https://other-shop.com/collections/all?sort_by=best-selling")).toBeNull();
+  });
+
+  it("rejects a redirect away from the collection (e.g. home or search)", () => {
+    expect(safeCollectionRedirectTarget(req, "https://shop.example/")).toBeNull();
+    expect(safeCollectionRedirectTarget(req, "https://shop.example/search?q=Produits")).toBeNull();
+  });
+
+  it("rejects non-http(s) targets", () => {
+    expect(safeCollectionRedirectTarget(req, "javascript:void(0)")).toBeNull();
   });
 });

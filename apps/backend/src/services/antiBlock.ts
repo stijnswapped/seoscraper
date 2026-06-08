@@ -178,6 +178,16 @@ export function isProxyConfigured(): boolean {
   return getProxyConfig() !== null;
 }
 
+/**
+ * Whether a configured proxy is a ROTATING pool (PROXY_ROTATING=true), i.e. each
+ * new request/connection gets a fresh exit IP. Callers use this to decide whether
+ * retrying a blocked request is worthwhile (a fresh exit may not be blocked); a
+ * static proxy or no proxy would just hit the same IP again.
+ */
+export function isProxyRotating(): boolean {
+  return PROXY_ROTATING && isProxyConfigured();
+}
+
 /** Skip the proxy (go direct) for the cooldown window, then it auto-retries. */
 export function markProxyUnhealthy(context: string, detail?: string): void {
   const wasHealthy = isProxyHealthy();

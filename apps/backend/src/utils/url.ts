@@ -148,6 +148,73 @@ export function normalizeImageUrl(raw: string, baseUrl: string): string | null {
 }
 
 /**
+ * Strip a single leading Shopify locale/market segment from a path, e.g.
+ * `/en-us/collections/all` -> `/collections/all`, `/fr/products/x` -> `/products/x`.
+ * Only a `{lang}` or `{lang}-{region}` segment is removed (never a real path part
+ * like `/collections`), so non-localized paths are returned unchanged.
+ */
+export function stripLocalePrefix(pathname: string): string {
+  return pathname.replace(/^\/[a-z]{2}(?:-[a-z]{2})?(?=\/)/i, "");
+}
+
+/** The `/collections/<handle>` handle of a URL (locale prefix ignored), or null. */
+export function collectionHandleOf(url: URL): string | null {
+  const match = stripLocalePrefix(url.pathname).match(/\/collections\/([^/?#]+)/i);
+  return match?.[1]?.toLowerCase() ?? null;
+}
+
+/** Same registrable host ignoring a leading `www.` (e.g. www.shop.com == shop.com). */
+function sameHostIgnoringWww(a: string, b: string): boolean {
+  const strip = (h: string) => h.toLowerCase().replace(/^www\./, "");
+  return strip(a) === strip(b);
+}
+
+/**
+ * Decide whether a redirect from a collection page is "safe" to follow, and if
+ * so return the URL to fetch next.
+ *
+ * Many Shopify stores 301/302 a collection to a localized (`/en-us/…`,
+ * `/fr-fr/…`) or `www.`-canonicalized copy of the SAME collection. Refusing to
+ * follow these (the old `redirect: "manual"` behavior) made the best-selling
+ * HTML tier fail, so the tracker silently fell back to products.json's UNSORTED
+ * default order — recording wrong "best-selling" ranks (deloxusa, vitellimoda)
+ * or skipping the store entirely when products.json also redirected
+ * (kouvrfashion).
+ *
+ * A redirect is safe only when it lands on the SAME collection handle on the
+ * same registrable host. Redirects that change the collection handle (a
+ * renamed/merged collection = a different listing) return null and must NOT be
+ * followed. The requested `sort_by`/`page` params are re-applied to the target
+ * so a redirect that drops them still yields the correctly-sorted grid.
+ */
+export function safeCollectionRedirectTarget(requestedUrl: string, location: string): string | null {
+  let requested: URL;
+  let target: URL;
+  try {
+    requested = new URL(requestedUrl);
+    target = new URL(location, requestedUrl);
+  } catch {
+    return null;
+  }
+  if (target.protocol !== "http:" && target.protocol !== "https:") return null;
+  if (!sameHostIgnoringWww(requested.hostname, target.hostname)) return null;
+
+  const requestedHandle = collectionHandleOf(requested);
+  const targetHandle = collectionHandleOf(target);
+  if (!requestedHandle || !targetHandle || requestedHandle !== targetHandle) return null;
+
+  // Re-apply the params that drive ordering/pagination so a redirect that drops
+  // them (e.g. a theme that strips ?sort_by) still returns the requested view.
+  const sortBy = requested.searchParams.get("sort_by");
+  if (sortBy && target.searchParams.get("sort_by") !== sortBy) target.searchParams.set("sort_by", sortBy);
+  const page = requested.searchParams.get("page");
+  if (page && !target.searchParams.get("page")) target.searchParams.set("page", page);
+
+  const next = target.toString();
+  return next === requestedUrl ? null : next;
+}
+
+/**
  * Parse a srcset attribute and return the candidate URLs (descriptors stripped).
  */
 export function parseSrcset(srcset: string): string[] {

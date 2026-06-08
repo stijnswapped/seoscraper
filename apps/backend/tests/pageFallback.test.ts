@@ -13,6 +13,12 @@ describe("isRedirectAway", () => {
   it("allows www/host change when sort_by is preserved", () => {
     expect(isRedirectAway(collection, "https://www.jacinnewyork.co/collections/all?sort_by=best-selling")).toBe(false);
   });
+  it("allows a locale-prefixed copy of the same collection (e.g. /en-us)", () => {
+    expect(isRedirectAway(collection, "https://jacinnewyork.co/en-us/collections/all?sort_by=best-selling")).toBe(false);
+  });
+  it("still flags a locale-prefixed redirect that drops sort_by", () => {
+    expect(isRedirectAway(collection, "https://jacinnewyork.co/en-us/collections/all")).toBe(true);
+  });
   it("ignores a trailing slash difference (no sort requested)", () => {
     expect(isRedirectAway("https://x.co/collections/all", "https://x.co/collections/all/")).toBe(false);
   });
