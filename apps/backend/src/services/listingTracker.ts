@@ -9,9 +9,9 @@ import type {
   ListingSourceUsed,
 } from "../types/productCheck.js";
 import { CheckError } from "../types/productCheck.js";
-import { assertDomainAllowed, validateAndNormalizeUrl } from "../utils/url.js";
+import { assertDomainAllowed, safeCollectionRedirectTarget, validateAndNormalizeUrl } from "../utils/url.js";
 import { withBrowserSession } from "./pageLoader.js";
-import { buildRealisticHeaders, fetchDirect, isBlockedResponse, isProxyConfigured, proxyFetch } from "./antiBlock.js";
+import { buildRealisticHeaders, fetchDirect, isBlockedResponse, isProxyConfigured, isProxyRotating, proxyFetch } from "./antiBlock.js";
 import { crawlPages, resolveMaxPages } from "./pagination.js";
 import type { ProgressReporter } from "./progressHub.js";
 import {
@@ -141,6 +141,20 @@ export async function extractListingItems(
   const browserHtml = () => extractHtmlListingItems(url, maxProducts, maxPages, progress, warnings);
   const shopifyJson = () => extractShopifyListingItems(url, maxProducts, maxPages, progress, warnings);
 
+  // Some stores IP-cloak: a "bad" exit IP is redirected away from the collection
+  // (e.g. laurence-boutique.fr → /search), so the browser renders zero products
+  // even though the store isn't empty. With a ROTATING residential pool, each
+  // attempt gets a fresh exit, so retrying recovers the real grid. Only retry
+  // when rotating (a static/no proxy would just hit the same blocked IP again).
+  const browserHtmlWithRetry = async (): Promise<ListingRankItem[]> => {
+    let items = await browserHtml();
+    if (items.length > 0 || !isProxyRotating()) return items;
+    for (let attempt = 1; attempt <= LISTING_BROWSER_RETRY_ATTEMPTS && items.length === 0; attempt++) {
+      items = await browserHtml(); // fresh exit IP on the rotating gateway
+    }
+    return items;
+  };
+
   if (strategy === "shopify_json") {
     const items = await shopifyJson();
     if (hasSortBy && items.length > 0) warnings.push(ORDER_UNRELIABLE_WARNING);
@@ -156,7 +170,7 @@ export async function extractListingItems(
     let items = await fetchHtml();
     let tier = "fetched-html";
     if (items.length === 0) {
-      items = await browserHtml();
+      items = await browserHtmlWithRetry();
       tier = "browser-html";
     }
     return { sourceUsed: "html", items, warnings, rawMetadata: { htmlCount: items.length, tier, orderReliable: true } };
@@ -167,7 +181,7 @@ export async function extractListingItems(
   // HTML fetch preserves the exact ?sort_by=best-selling URL (no JS), so the
   // order is reliable; json only fills display fields.
   let htmlItems = await fetchHtml();
-  if (htmlItems.length === 0) htmlItems = await browserHtml();
+  if (htmlItems.length === 0) htmlItems = await browserHtmlWithRetry();
   const shopifyItems = await shopifyJson();
   const orderReliable = htmlItems.length > 0 || !hasSortBy;
   if (hasSortBy && htmlItems.length === 0 && shopifyItems.length > 0) warnings.push(ORDER_UNRELIABLE_WARNING);
@@ -228,9 +242,6 @@ async function extractFetchedHtmlListingItems(
 
   for (let page = 1; page <= maxPages && byKey.size < maxProducts; page++) {
     const pageUrl = buildPaginatedUrl(url, page);
-    // Scrape exactly the URL that was requested — never the target of a redirect.
-    // We keep finalUrl pinned to the requested URL so links resolve against it.
-    const finalUrl = pageUrl;
     const result = await fetchCollectionPageHtml(pageUrl, url.origin);
     if (!result.ok) {
       if (page === 1) warnings.push(result.warning);
@@ -239,7 +250,10 @@ async function extractFetchedHtmlListingItems(
 
     const $ = load(result.html);
     const before = byKey.size;
-    collectProductLinks($, finalUrl, byKey, maxProducts);
+    // Resolve product links against the URL we actually landed on (a safe
+    // localized/`www.` redirect of the requested collection), so relative
+    // `/products/…` hrefs match the page's own host.
+    collectProductLinks($, result.finalUrl, byKey, maxProducts);
     if (byKey.size === before) break; // no new products → end of pagination
 
     progress?.({
@@ -254,8 +268,18 @@ async function extractFetchedHtmlListingItems(
 }
 
 type CollectionPageFetch =
-  | { ok: true; html: string; viaDirect: boolean }
+  | { ok: true; html: string; viaDirect: boolean; finalUrl: string }
   | { ok: false; warning: string };
+
+/** Max redirect hops to follow before giving up (guards against loops). */
+const MAX_SAFE_REDIRECTS = 4;
+/**
+ * Extra browser retries after the first empty render when we're on a rotating
+ * proxy pool. Each retry gets a fresh exit IP, which can recover a cloaked
+ * collection without affecting static-proxy or direct traffic.
+ */
+const LISTING_BROWSER_RETRY_ATTEMPTS =
+  Number(process.env.LISTING_BROWSER_RETRY_ATTEMPTS) > 0 ? Number(process.env.LISTING_BROWSER_RETRY_ATTEMPTS) : 5;
 
 /**
  * Fetch one collection page, retrying DIRECT (bypassing the proxy) when the
@@ -272,56 +296,70 @@ type CollectionPageFetch =
  * retry on a BLOCK (not a redirect/HTTP error) and only when a proxy is actually
  * in play, so the no-proxy and happy paths are unchanged.
  *
- * `redirect: "manual"` makes a 3xx come back as an inspectable response instead
- * of fetch silently following it to a canonical/other page.
+ * `redirect: "manual"` makes a 3xx come back as an inspectable response so we can
+ * decide whether to follow it: a redirect to the SAME collection (localized
+ * `/en-us/…` or `www.`-canonicalized) IS followed — with the requested
+ * `sort_by`/`page` re-applied — because the server-rendered grid there is still
+ * the listing we asked for, in the order we asked for. A redirect that changes
+ * the collection handle is NOT followed (it's a different listing).
  */
 export async function fetchCollectionPageHtml(pageUrl: string, origin: string): Promise<CollectionPageFetch> {
   const init: RequestInit = { headers: buildRealisticHeaders(origin), redirect: "manual" };
 
   type Attempt =
-    | { ok: true; html: string }
+    | { ok: true; html: string; finalUrl: string }
     | { ok: false; blocked: boolean; warning: string };
 
   const attempt = async (fetcher: typeof proxyFetch): Promise<Attempt> => {
-    try {
-      const response = await fetcher(pageUrl, init);
-      if (response.status >= 300 && response.status < 400) {
-        return {
-          ok: false,
-          blocked: false,
-          warning:
-            `Fetched HTML returned a redirect (HTTP ${response.status} → ${response.headers.get("location") ?? "unknown"}); ` +
-            "scraping only the requested URL, so the redirect was not followed.",
-        };
+    let currentUrl = pageUrl;
+    for (let hop = 0; hop < MAX_SAFE_REDIRECTS; hop++) {
+      try {
+        const response = await fetcher(currentUrl, init);
+        if (response.status >= 300 && response.status < 400) {
+          const location = response.headers.get("location");
+          const safeTarget = location ? safeCollectionRedirectTarget(currentUrl, location) : null;
+          if (safeTarget) {
+            currentUrl = safeTarget;
+            continue;
+          }
+          return {
+            ok: false,
+            blocked: false,
+            warning:
+              `Fetched HTML returned a redirect (HTTP ${response.status} → ${location ?? "unknown"}); ` +
+              "it points at a different collection, so it was not followed.",
+          };
+        }
+        if (!response.ok) {
+          const blocked = isBlockedResponse(response.status, "", response.headers.get("server"));
+          return {
+            ok: false,
+            blocked,
+            warning: blocked
+              ? `Fetched HTML blocked by bot protection (HTTP ${response.status}).`
+              : `Fetched HTML returned HTTP ${response.status}.`,
+          };
+        }
+        const html = await response.text();
+        if (isBlockedResponse(response.status, html, response.headers.get("server"))) {
+          return { ok: false, blocked: true, warning: "Fetched HTML returned a Cloudflare challenge; escalating." };
+        }
+        return { ok: true, html, finalUrl: currentUrl };
+      } catch (err) {
+        return { ok: false, blocked: false, warning: `Fetched HTML extraction failed: ${(err as Error).message}` };
       }
-      if (!response.ok) {
-        const blocked = isBlockedResponse(response.status, "", response.headers.get("server"));
-        return {
-          ok: false,
-          blocked,
-          warning: blocked
-            ? `Fetched HTML blocked by bot protection (HTTP ${response.status}).`
-            : `Fetched HTML returned HTTP ${response.status}.`,
-        };
-      }
-      const html = await response.text();
-      if (isBlockedResponse(response.status, html, response.headers.get("server"))) {
-        return { ok: false, blocked: true, warning: "Fetched HTML returned a Cloudflare challenge; escalating." };
-      }
-      return { ok: true, html };
-    } catch (err) {
-      return { ok: false, blocked: false, warning: `Fetched HTML extraction failed: ${(err as Error).message}` };
     }
+    return { ok: false, blocked: false, warning: "Fetched HTML exceeded the redirect limit." };
   };
 
   const proxied = await attempt(proxyFetch);
-  if (proxied.ok) return { ok: true, html: proxied.html, viaDirect: false };
+  if (proxied.ok) return { ok: true, html: proxied.html, viaDirect: false, finalUrl: proxied.finalUrl };
 
   // Only a BLOCK is worth retrying direct, and only when the first attempt
   // actually used a proxy IP (otherwise a direct retry just hits the same wall).
   if (proxied.blocked && isProxyConfigured()) {
     const direct = await attempt(fetchDirect);
-    if (direct.ok) return { ok: true, html: direct.html, viaDirect: true };
+    if (direct.ok) return { ok: true, html: direct.html, viaDirect: true, finalUrl: direct.finalUrl };
   }
   return { ok: false, warning: proxied.warning };
 }
@@ -343,7 +381,13 @@ const NON_GRID_LINK_CONTAINER = [
   '[class*="mega-menu" i]',
   '[class*="menu-drawer" i]',
   '[class*="site-nav" i]',
-  '[class*="drawer" i]',
+  // Exclude cart/menu/search/account drawers, but NOT a collection's own layout
+  // container that merely has "drawer" in its name. Several themes wrap the whole
+  // product grid in e.g. `collection collection--filters-drawer` (sendowear.com),
+  // and a bare `[class*="drawer"]` wrongly dropped the entire grid — leaving zero
+  // products, so the tracker silently fell back to products.json's default
+  // (alphabetical) order and recorded wrong "best-selling" ranks.
+  '[class*="drawer" i]:not([class*="filter" i]):not([class*="collection" i]):not([class*="product" i])',
   '[class*="mini-cart" i]',
   '[class*="cart-drawer" i]',
   '[class*="add-on" i]',
@@ -427,7 +471,9 @@ function collectProductLinks(
   // Rank only the real product grid (see selectListingAnchors) so the order
   // reflects the requested sort_by, not menu/cart/upsell links that are identical
   // across every sort order.
+  const siteName = detectSiteName($);
   const anchors = selectListingAnchors($);
+  const before = byKey.size;
   anchors.each((_, el) => {
     if (byKey.size >= maxProducts) return;
     const href = $(el).attr("href");
@@ -435,7 +481,8 @@ function collectProductLinks(
     const productUrl = normalizeProductUrl(href, finalUrl);
     if (!productUrl) return;
     const product = productIdentity(productUrl);
-    const title = findProductTitle($, el);
+    if (isJunkProductHandle(product.handle)) return; // cart add-ons / gift cards aren't ranked
+    const title = stripSiteSuffix(findProductTitle($, el), siteName);
     const imageUrl = findNearestImageUrl($, el, finalUrl);
     const existing = byKey.get(product.productKey);
     if (existing) {
@@ -456,6 +503,91 @@ function collectProductLinks(
       source: "html",
     });
   });
+
+  if (byKey.size === before) {
+    collectShopifyCollectionViewProducts($, finalUrl, byKey, maxProducts);
+  }
+}
+
+interface ShopifyPixelVariant {
+  id?: unknown;
+  image?: { src?: unknown } | null;
+  product?: {
+    id?: unknown;
+    title?: unknown;
+    url?: unknown;
+  } | null;
+}
+
+function collectShopifyCollectionViewProducts(
+  $: CheerioAPI,
+  finalUrl: string,
+  byKey: Map<string, ListingRankItem>,
+  maxProducts: number,
+): void {
+  const scripts = $('script[data-page-type="collection"][data-events], script[data-events*="collection_viewed"]');
+  scripts.each((_, el) => {
+    if (byKey.size >= maxProducts) return;
+    const raw = decodeHtmlEntities($(el).attr("data-events"));
+    if (!raw) return;
+    const variants = parseCollectionViewVariants(raw);
+    for (const variant of variants) {
+      if (byKey.size >= maxProducts) break;
+      const rawProductUrl = asString(variant.product?.url);
+      const productUrl = rawProductUrl ? normalizeProductUrl(rawProductUrl, finalUrl) : null;
+      if (!productUrl) continue;
+      const product = productIdentity(productUrl);
+      if (isJunkProductHandle(product.handle)) continue;
+      if (byKey.has(product.productKey)) continue;
+      const productId = asString(variant.product?.id);
+      const title = asString(variant.product?.title);
+      const imageUrl = normalizeImageUrl(asString(variant.image?.src), finalUrl);
+      byKey.set(product.productKey, {
+        rank: byKey.size + 1,
+        productKey: productId ? `shopify:${productId}` : product.productKey,
+        url: productUrl,
+        ...(product.handle ? { handle: product.handle } : {}),
+        ...(title ? { title } : {}),
+        ...(imageUrl ? { imageUrl } : {}),
+        ...(productId ? { productId } : {}),
+        source: "html",
+      });
+    }
+  });
+}
+
+function parseCollectionViewVariants(raw: string): ShopifyPixelVariant[] {
+  try {
+    const events = JSON.parse(raw) as unknown;
+    if (!Array.isArray(events)) return [];
+    for (const event of events) {
+      if (!Array.isArray(event) || event.length < 2 || event[0] !== "collection_viewed") continue;
+      const payload = event[1];
+      const variants = payload && typeof payload === "object" ? (payload as { collection?: { productVariants?: unknown } }).collection?.productVariants : null;
+      if (Array.isArray(variants)) return variants as ShopifyPixelVariant[];
+    }
+  } catch {}
+  return [];
+}
+
+function decodeHtmlEntities(value: string | undefined): string | undefined {
+  if (!value) return value;
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function normalizeImageUrl(value: string | undefined, baseUrl: string): string | undefined {
+  if (!value) return undefined;
+  try {
+    if (value.startsWith("//")) return new URL(`https:${value}`).toString();
+    return new URL(value, baseUrl).toString();
+  } catch {
+    return undefined;
+  }
 }
 
 /** Append/replace `?page=N` while preserving existing query params (e.g. sort_by). */
@@ -482,27 +614,41 @@ async function extractShopifyListingItems(
   for (let page = 1; page <= maxPages && items.length < maxProducts; page++) {
     const endpoint = `${url.origin}${collectionPath}/products.json?limit=250&page=${page}`;
     let products: unknown;
+    let redirected = false;
     try {
-      const response = await proxyFetch(endpoint, {
-        headers: {
-          ...buildRealisticHeaders(url.origin),
-          // products.json is an XHR-style request, not a top-level navigation.
-          accept: "application/json,text/plain,*/*;q=0.8",
-          "sec-fetch-dest": "empty",
-          "sec-fetch-mode": "cors",
-        },
-        // Don't follow redirects: a renamed/merged collection 301s
-        // /collections/OLD/products.json → /collections/NEW/products.json on the
-        // SAME origin, which would silently return a different listing's products.
-        redirect: "manual",
-      });
-      if (response.status >= 300 && response.status < 400) {
-        warnings.push(
-          `Shopify products JSON redirected (HTTP ${response.status} → ${response.headers.get("location") ?? "unknown"}); ` +
-            "scraping only the requested collection, so the redirect was not followed.",
-        );
+      // Follow only SAFE redirects (a localized `/en-us/…` or `www.`-canonical
+      // copy of the SAME collection), re-applying ?page. A redirect that changes
+      // the collection handle (a renamed/merged collection) is NOT followed —
+      // that would silently return a different listing's products.
+      let currentUrl = endpoint;
+      let response: Response | null = null;
+      for (let hop = 0; hop < MAX_SAFE_REDIRECTS; hop++) {
+        response = await proxyFetch(currentUrl, {
+          headers: {
+            ...buildRealisticHeaders(url.origin),
+            // products.json is an XHR-style request, not a top-level navigation.
+            accept: "application/json,text/plain,*/*;q=0.8",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+          },
+          redirect: "manual",
+        });
+        if (response.status >= 300 && response.status < 400) {
+          const location = response.headers.get("location");
+          const safeTarget = location ? safeCollectionRedirectTarget(currentUrl, location) : null;
+          if (safeTarget) {
+            currentUrl = safeTarget;
+            continue;
+          }
+          warnings.push(
+            `Shopify products JSON redirected (HTTP ${response.status} → ${location ?? "unknown"}); ` +
+              "it points at a different collection, so the redirect was not followed.",
+          );
+          redirected = true;
+        }
         break;
       }
+      if (redirected || !response) break;
       if (!response.ok) {
         if (page === 1) warnings.push(`Shopify products JSON returned HTTP ${response.status}.`);
         break;
@@ -521,6 +667,7 @@ async function extractShopifyListingItems(
       const obj = product as ShopifyProductJson;
       const handle = asString(obj.handle);
       if (!handle) continue;
+      if (isJunkProductHandle(handle)) continue; // cart add-ons / gift cards aren't ranked
       const productUrl = new URL(`/products/${handle}`, url.origin).toString();
       const productId = asString(obj.id);
       const productKey = productId ? `shopify:${productId}` : `handle:${handle.toLowerCase()}`;
@@ -562,7 +709,11 @@ function mergeListingItems(htmlItems: ListingRankItem[], shopifyItems: ListingRa
       ...item,
       rank: index + 1,
       productKey: enrichment?.productId ? `shopify:${enrichment.productId}` : item.productKey,
-      title: item.title ?? enrichment?.title,
+      // Prefer products.json's canonical product title over the HTML-scraped one:
+      // the JSON `title` is the authoritative product name, while themes often
+      // expose an SEO-flavored `img alt` like "H.D Balboa Shorts - Handsome Dans"
+      // (store-name suffix). HTML title is kept only when there's no JSON match.
+      title: enrichment?.title ?? item.title,
       imageUrl: item.imageUrl ?? enrichment?.imageUrl,
       productId: enrichment?.productId ?? item.productId,
       source: enrichment ? "both" : item.source,
@@ -676,6 +827,49 @@ function productIdentity(productUrl: string): { productKey: string; handle?: str
   const match = url.pathname.match(/\/products\/([^/?#]+)/i);
   const handle = match?.[1]?.toLowerCase();
   return handle ? { productKey: `handle:${handle}`, handle } : { productKey: productUrl };
+}
+
+/**
+ * Storefront "products" that are NOT real catalog items: cart add-ons injected by
+ * apps (shipping/package protection, order insurance, tips, donations) and gift
+ * cards. Several themes render these inside the collection grid, where they can
+ * outrank real products (e.g. jackhafford's "Shipping Protection" landed at rank
+ * #1). They link to a /products/ handle like a normal product, so they slip past
+ * the grid filter — exclude them by handle so best-selling ranks stay clean.
+ */
+const JUNK_PRODUCT_HANDLE_RE =
+  /(^|[-_])(?:(?:shipping|package|order|delivery)[-_]?(?:protection|insurance|guarantee)|route[-_]?insurance|seel[-_]?protection|worry[-_]?free|e?[-_]?gift[-_]?card|tip|tipping|donation|round[-_]?up)s?([-_]|$)/i;
+
+function isJunkProductHandle(handle: string | undefined): boolean {
+  return handle ? JUNK_PRODUCT_HANDLE_RE.test(handle.toLowerCase()) : false;
+}
+
+/**
+ * The store's display name, used to strip a trailing "<product> - <store>"
+ * suffix that themes bake into image `alt` text / SEO titles. Prefer the
+ * explicit og:site_name; otherwise fall back to the trailing segment of the
+ * document <title> (e.g. "Best sellers – Handsome Dans" → "Handsome Dans").
+ */
+function detectSiteName($: CheerioAPI): string | undefined {
+  const og = cleanText($('meta[property="og:site_name"]').attr("content"));
+  if (og) return og;
+  const docTitle = cleanText($("title").first().text());
+  const trailing = docTitle?.match(/[|\-–—]\s*([^|\-–—]{2,40})\s*$/);
+  return trailing?.[1]?.trim();
+}
+
+/**
+ * Remove a trailing " - {store}" / " | {store}" / " – {store}" suffix from a
+ * scraped title (handsomedans' `img alt` is "H.D Balboa Shorts - Handsome
+ * Dans"). Only strips when the suffix matches the detected store name, so real
+ * product names containing a dash (e.g. "Tee - Black") are left intact. If
+ * stripping would empty the title, the original is kept.
+ */
+function stripSiteSuffix(title: string | undefined, siteName: string | undefined): string | undefined {
+  if (!title || !siteName) return title;
+  const escaped = siteName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const stripped = title.replace(new RegExp(`\\s*[|\\-–—]\\s*${escaped}\\s*$`, "i"), "").trim();
+  return stripped.length > 0 ? stripped : title;
 }
 
 /**

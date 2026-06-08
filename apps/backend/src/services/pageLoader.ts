@@ -2,6 +2,7 @@ import { chromium, type Browser, type Page } from "playwright";
 import { sitesConfig } from "../../../../config/sites.config.js";
 import { CheckError } from "../types/productCheck.js";
 import { createLogger } from "../utils/logger.js";
+import { stripLocalePrefix } from "../utils/url.js";
 import { Semaphore } from "../utils/semaphore.js";
 import {
   STEALTH_INIT_SCRIPT,
@@ -76,6 +77,8 @@ export interface LoadPageOptions {
   scrollProfile?: "product" | "listing";
 }
 
+const LISTING_PRODUCT_LINK_SELECTOR = 'a[href*="/products/"]';
+
 /** A browser session that can render multiple pages without relaunching Chromium. */
 export interface BrowserSession {
   loadPage(url: string, opts?: LoadPageOptions): Promise<LoadedPage>;
@@ -90,8 +93,11 @@ export function isRedirectAway(targetUrl: string, navUrl: string): boolean {
   try {
     const target = new URL(targetUrl);
     const nav = new URL(navUrl, targetUrl);
-    const tp = (target.pathname.replace(/\/+$/, "") || "/").toLowerCase();
-    const np = (nav.pathname.replace(/\/+$/, "") || "/").toLowerCase();
+    // Compare paths with any leading Shopify locale segment stripped, so a
+    // store that redirects /collections/all → /en-us/collections/all (the SAME
+    // listing, localized) is NOT treated as a redirect-away (e.g. kouvrfashion).
+    const tp = (stripLocalePrefix(target.pathname).replace(/\/+$/, "") || "/").toLowerCase();
+    const np = (stripLocalePrefix(nav.pathname).replace(/\/+$/, "") || "/").toLowerCase();
     if (tp !== np) return true;
     // Same path, but if we asked for a specific sort (e.g. ?sort_by=best-selling)
     // and the page dropped/changed it, the order we'd capture is wrong — treat as
@@ -155,15 +161,36 @@ export async function withBrowserSession<T>(
             throw new CheckError("PAGE_LOAD_FAILED", "Blocked by bot protection (Cloudflare challenge).");
           }
 
+          // Some stores briefly render the real collection grid and then JS-redirect
+          // headless browsers away (e.g. Laurence Boutique -> /search). Capture an
+          // early snapshot as soon as product links appear so we can keep the real
+          // listing if the later navigation tears down the page.
+          const earlyListingSnapshot =
+            opts?.scrollProfile === "listing" ? await captureListingSnapshot(page, url, browser.timeoutMs) : null;
+
           const scrollTimeout =
             opts?.scrollProfile === "listing"
               ? browser.scrollTimeoutMs
               : browser.productScrollTimeoutMs;
           await autoScroll(page, scrollTimeout, browser.scrollSettleRounds);
 
-          const html = await page.content();
-          const finalUrl = page.url();
-          const title = await page.title();
+          let html: string;
+          let finalUrl: string;
+          let title: string;
+          try {
+            html = await page.content();
+            finalUrl = page.url();
+            title = await page.title();
+          } catch (err) {
+            if (earlyListingSnapshot && isNavigationInterruption(err)) {
+              log.warn("using early listing snapshot after navigation interruption", {
+                url,
+                message: (err as Error).message,
+              });
+              return earlyListingSnapshot;
+            }
+            throw err;
+          }
 
           // Some themes JS-redirect a deep URL (e.g. a sorted collection) to the
           // home page, which destroys the content we asked for. The browser can't
@@ -171,6 +198,13 @@ export async function withBrowserSession<T>(
           // failure — callers fall back to a direct fetch, which (running no JS)
           // returns the real server-rendered content at the requested URL.
           if (isRedirectAway(url, finalUrl)) {
+            if (earlyListingSnapshot) {
+              log.warn("using early listing snapshot before redirect-away", {
+                url,
+                redirectedTo: finalUrl,
+              });
+              return earlyListingSnapshot;
+            }
             throw new CheckError(
               "PAGE_LOAD_FAILED",
               `Page client-side redirected away from the requested URL (to ${finalUrl}).`,
@@ -199,6 +233,33 @@ export async function withBrowserSession<T>(
     if (browserInstance) await browserInstance.close().catch(() => {});
     browserSlots.release();
   }
+}
+
+async function captureListingSnapshot(page: Page, targetUrl: string, timeoutMs: number): Promise<LoadedPage | null> {
+  const deadline = Date.now() + Math.min(timeoutMs, 8_000);
+  while (Date.now() < deadline) {
+    try {
+      const finalUrl = page.url();
+      if (isRedirectAway(targetUrl, finalUrl)) return null;
+      const count = await page.locator(LISTING_PRODUCT_LINK_SELECTOR).count();
+      if (count > 0) {
+        const html = await page.content();
+        const title = await page.title();
+        return { finalUrl, html, title };
+      }
+    } catch (err) {
+      if (!isNavigationInterruption(err)) return null;
+    }
+    await page.waitForTimeout(250);
+  }
+  return null;
+}
+
+function isNavigationInterruption(err: unknown): boolean {
+  const message = (err as Error)?.message ?? "";
+  return /page\.content: Unable to retrieve content because the page is navigating|Execution context was destroyed|Target page, context or browser has been closed/i.test(
+    message,
+  );
 }
 
 /** Render a single page (convenience wrapper around a one-shot session). */

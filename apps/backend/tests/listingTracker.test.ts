@@ -12,6 +12,24 @@ function collectionHtml(handles: string[]): string {
   return `<html><body><ul class="grid">${cards}</ul></body></html>`;
 }
 
+function collectionPixelsHtml(handles: string[]): string {
+  const variants = handles.map((handle, index) => ({
+    price: { amount: 19.95 + index, currencyCode: "EUR" },
+    product: {
+      id: String(1000 + index),
+      title: `${handle} title`,
+      url: `/products/${handle}`,
+    },
+    id: String(2000 + index),
+    image: { src: `//cdn.shop.example/${handle}.jpg` },
+    title: "Default",
+  }));
+  const dataEvents = JSON.stringify([["page_viewed", {}], ["collection_viewed", { collection: { title: "Produits", productVariants: variants } }]]);
+  return `<html><body>
+    <script data-page-type="collection" data-events="${dataEvents.replace(/"/g, "&quot;")}"></script>
+  </body></html>`;
+}
+
 function jsonResponse(body: unknown): Response {
   // `Response.url` is empty when built via the constructor; callers stub it.
   return new Response(JSON.stringify(body), {
@@ -76,6 +94,92 @@ describe("extractListingItems — plain-fetch HTML tier (auto)", () => {
       "Alt Title Two",
       "Heading Title Three",
     ]);
+  });
+
+  it("falls back to Shopify collection_viewed pixel data when the rendered page has no product anchors", async () => {
+    const order = ["best-1", "best-2", "best-3"];
+    fetchHtmlPage1(collectionPixelsHtml(order));
+
+    const result = await extractListingItems(
+      new URL("https://shop.example/collections/all?sort_by=best-selling"),
+      "html",
+      100,
+      1,
+    );
+
+    expect(result.items.map((i) => i.handle)).toEqual(order);
+    expect(result.items.map((i) => i.title)).toEqual(order.map((handle) => `${handle} title`));
+    expect(result.items[0]?.imageUrl).toBe("https://cdn.shop.example/best-1.jpg");
+  });
+
+  it("prefers the canonical products.json title over an SEO-suffixed HTML title", async () => {
+    // HTML exposes "H.D Balboa Shorts - Handsome Dans" (store-name suffix);
+    // products.json has the clean canonical title, which must win.
+    const html = `<html><body><ul id="product-grid">
+      <li class="card"><a href="/products/balboa" aria-label="H.D Balboa Shorts - Handsome Dans"><img src="/b.jpg"></a></li>
+    </ul></body></html>`;
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const u = new URL(input.toString());
+      if (u.pathname.endsWith("/products.json")) {
+        const products =
+          Number(u.searchParams.get("page") ?? "1") === 1
+            ? [{ id: 1, handle: "balboa", title: "H.D Balboa Shorts" }]
+            : [];
+        const res = jsonResponse({ products });
+        Object.defineProperty(res, "url", { value: u.toString() });
+        return res;
+      }
+      const page = Number(u.searchParams.get("page") ?? "1");
+      const res = new Response(page === 1 ? html : "<html><body></body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+      Object.defineProperty(res, "url", { value: u.toString() });
+      return res;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await extractListingItems(
+      new URL("https://shop.example/collections/all?sort_by=best-selling"),
+      "auto",
+      100,
+      1,
+    );
+    expect(result.items[0]?.title).toBe("H.D Balboa Shorts");
+  });
+
+  it("strips the store-name suffix from an HTML-only title (og:site_name)", async () => {
+    const html = `<html><head>
+        <meta property="og:site_name" content="Handsome Dans">
+      </head><body><ul id="product-grid">
+        <li class="card"><a href="/products/balboa" aria-label="H.D Balboa Shorts - Handsome Dans"><img src="/b.jpg"></a></li>
+        <li class="card"><a href="/products/eden" aria-label="H.D Eden Shorts | Handsome Dans"><img src="/e.jpg"></a></li>
+      </ul></body></html>`;
+    fetchHtmlPage1(html);
+
+    const result = await extractListingItems(
+      new URL("https://shop.example/collections/all?sort_by=best-selling"),
+      "html",
+      100,
+      1,
+    );
+    expect(result.items.map((i) => i.title)).toEqual(["H.D Balboa Shorts", "H.D Eden Shorts"]);
+  });
+
+  it("does NOT strip a dash that is part of the real product name", async () => {
+    const html = `<html><head><meta property="og:site_name" content="Handsome Dans"></head>
+      <body><ul id="product-grid">
+        <li class="card"><a href="/products/tee" aria-label="Classic Tee - Black"><img src="/t.jpg"></a></li>
+      </ul></body></html>`;
+    fetchHtmlPage1(html);
+
+    const result = await extractListingItems(
+      new URL("https://shop.example/collections/all?sort_by=best-selling"),
+      "html",
+      100,
+      1,
+    );
+    expect(result.items[0]?.title).toBe("Classic Tee - Black");
   });
 
   it("combines duplicate image/title anchors from the same product card", async () => {
@@ -155,6 +259,44 @@ describe("extractListingItems — ranks the real grid, not menu/upsell links", (
       expect(result.items[0]?.handle).toBe("x");
     },
   );
+
+  it("ranks a grid wrapped in a collection 'filters-drawer' container (sendowear theme)", async () => {
+    // The whole product grid lives inside `collection collection--filters-drawer`.
+    // A bare `[class*="drawer"]` exclusion wrongly dropped it, leaving 0 products.
+    const order = ["emmie", "elena", "silas"];
+    const links = order.map((h) => `<a href="/products/${h}">${h}</a>`).join("");
+    const html = `<html><body>
+      <header><a href="/products/${order[0]}">menu link</a></header>
+      <div class="collection collection--filters-drawer">${links}</div>
+    </body></html>`;
+    fetchHtmlPage1(html);
+
+    const result = await extractListingItems(
+      new URL("https://shop.example/collections/all?sort_by=best-selling"),
+      "html",
+      100,
+      1,
+    );
+    expect(result.items.map((i) => i.handle)).toEqual(order);
+    expect(result.items[0]?.handle).toBe("emmie");
+  });
+
+  it("still excludes a real cart drawer's product links", async () => {
+    const html = `<html><body>
+      <div class="drawer cart-drawer"><a href="/products/in-cart-item">in cart</a></div>
+      <ul id="product-grid"><a href="/products/g1">g1</a><a href="/products/g2">g2</a></ul>
+    </body></html>`;
+    fetchHtmlPage1(html);
+
+    const result = await extractListingItems(
+      new URL("https://shop.example/collections/all?sort_by=best-selling"),
+      "html",
+      100,
+      1,
+    );
+    expect(result.items.map((i) => i.handle)).toEqual(["g1", "g2"]);
+    expect(result.items.map((i) => i.handle)).not.toContain("in-cart-item");
+  });
 
   it("yields different top items for different grid order (sorted vs default)", async () => {
     fetchHtmlPage1(
@@ -278,6 +420,96 @@ describe("extractListingItems — retries DIRECT when the proxied HTML fetch is 
     expect(attempts).toBe(2); // proxied block → direct retry
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.viaDirect).toBe(true);
+  });
+});
+
+describe("extractListingItems — follows safe collection redirects (locale / www)", () => {
+  it("follows a locale-prefix redirect (e.g. /en-us) and ranks the real sorted grid", async () => {
+    const order = ["best-1", "second-2", "third-3"];
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const u = new URL(input.toString());
+      // products.json: also locale-redirects; once localized it returns a
+      // DEFAULT-order product that must NOT win the ranking.
+      if (u.pathname.endsWith("/products.json")) {
+        if (!u.pathname.startsWith("/en-us")) {
+          const r = new Response(null, {
+            status: 302,
+            headers: { location: `https://shop.example/en-us${u.pathname}${u.search}` },
+          });
+          Object.defineProperty(r, "url", { value: u.toString() });
+          return r;
+        }
+        const products =
+          Number(u.searchParams.get("page") ?? "1") === 1
+            ? [{ id: 1, handle: "alpha-default", title: "Alpha Default" }]
+            : [];
+        const res = jsonResponse({ products });
+        Object.defineProperty(res, "url", { value: u.toString() });
+        return res;
+      }
+      // HTML: the non-localized collection 302s to /en-us (same listing).
+      if (!u.pathname.startsWith("/en-us")) {
+        const r = new Response("redirecting", {
+          status: 302,
+          headers: { location: `https://shop.example/en-us${u.pathname}${u.search}` },
+        });
+        Object.defineProperty(r, "url", { value: u.toString() });
+        return r;
+      }
+      const page = Number(u.searchParams.get("page") ?? "1");
+      const res = new Response(page === 1 ? collectionHtml(order) : "<html><body></body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+      Object.defineProperty(res, "url", { value: u.toString() });
+      return res;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const url = new URL("https://shop.example/collections/all?sort_by=best-selling");
+    const result = await extractListingItems(url, "auto", 100, 2);
+
+    expect(result.items.map((i) => i.handle).slice(0, 3)).toEqual(order);
+    expect(result.items[0]?.handle).toBe("best-1");
+    expect(result.rawMetadata.orderReliable).toBe(true);
+    expect(result.items.map((i) => i.handle)).not.toContain("alpha-default");
+  });
+
+  it("does NOT follow a redirect to a different collection handle", async () => {
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const u = new URL(input.toString());
+      if (u.pathname.endsWith("/products.json")) {
+        const res = jsonResponse({ products: [] });
+        Object.defineProperty(res, "url", { value: u.toString() });
+        return res;
+      }
+      // /collections/all 301s to a DIFFERENT collection — must be refused.
+      const r = new Response("moved", {
+        status: 301,
+        headers: { location: "https://shop.example/collections/sale?sort_by=best-selling" },
+      });
+      Object.defineProperty(r, "url", { value: u.toString() });
+      return r;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchCollectionPageHtml(
+      "https://shop.example/collections/all?sort_by=best-selling",
+      "https://shop.example",
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.warning).toContain("different collection");
+  });
+});
+
+describe("extractListingItems — excludes cart add-ons / gift cards from ranks", () => {
+  it("drops shipping-protection and gift-card handles from the grid", async () => {
+    fetchHtmlPage1(collectionHtml(["shipping-protection", "real-product-1", "gift-card", "real-product-2"]));
+    const url = new URL("https://shop.example/collections/all?sort_by=best-selling");
+    const result = await extractListingItems(url, "html", 100, 1);
+
+    expect(result.items.map((i) => i.handle)).toEqual(["real-product-1", "real-product-2"]);
+    expect(result.items[0]?.handle).toBe("real-product-1");
   });
 });
 

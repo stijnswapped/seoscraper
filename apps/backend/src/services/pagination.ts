@@ -83,21 +83,32 @@ export function findNextPageUrl(
   const base = new URL(finalUrl);
   const currentPage = Number(base.searchParams.get("page") ?? "1") || 1;
   const candidates: string[] = [];
+  const fallbackCandidates: string[] = [];
 
   const relNext = $('link[rel="next"]').attr("href") ?? $('a[rel="next"]').attr("href");
   if (relNext) candidates.push(relNext);
 
-  $('a[aria-label*="next" i], a.next, a[class*="next" i], nav[aria-label*="pag" i] a[href], ul[class*="pag" i] a[href], div[class*="pag" i] a[href]').each(
+  $('a[aria-label*="next" i], a.next, a[class*="next" i]').each(
     (_, el) => {
       const href = $(el).attr("href");
       if (href) candidates.push(href);
     },
   );
 
+  $('nav[aria-label*="pag" i] a[href], ul[class*="pag" i] a[href], div[class*="pag" i] a[href], nav[class*="pag" i] a[href]').each(
+    (_, el) => {
+      const href = $(el).attr("href");
+      if (!href) return;
+      if (looksLikeNextControl($, el)) candidates.push(href);
+      else fallbackCandidates.push(href);
+    },
+  );
+
   const sameHost = (u: URL) => u.hostname.toLowerCase() === base.hostname.toLowerCase();
+  const samePath = (u: URL) => normalizePathname(u.pathname) === normalizePathname(base.pathname);
 
   // Prefer a candidate that explicitly points at page = current + 1.
-  for (const raw of candidates) {
+  for (const raw of [...candidates, ...fallbackCandidates]) {
     const abs = toAbsolute(raw, base);
     if (!abs || visited.has(abs)) continue;
     const u = new URL(abs);
@@ -106,17 +117,35 @@ export function findNextPageUrl(
     if (pageParam === currentPage + 1) return abs;
   }
 
-  // Otherwise take the first plausible same-host, unvisited pagination link.
+  // Otherwise take the first explicit "next" control that stays on the same
+  // listing path. Do NOT fall back to arbitrary same-host links from a broad
+  // "pagination-ish" container; some themes wrap the whole mobile/site nav in
+  // such a container, and that sends the crawler to "/" or "/search".
   for (const raw of candidates) {
     const abs = toAbsolute(raw, base);
     if (!abs || visited.has(abs)) continue;
     const u = new URL(abs);
     if (!sameHost(u)) continue;
     if (u.pathname === base.pathname && u.search === base.search) continue;
+    if (!samePath(u)) continue;
     return abs;
   }
 
   return null;
+}
+
+function normalizePathname(pathname: string): string {
+  const normalized = pathname.replace(/\/+$/, "");
+  return normalized || "/";
+}
+
+function looksLikeNextControl($: CheerioAPI, el: unknown): boolean {
+  const node = $(el as Parameters<CheerioAPI>[0]);
+  const text = node.text().trim().replace(/\s+/g, " ").toLowerCase();
+  const aria = (node.attr("aria-label") ?? "").trim().toLowerCase();
+  const rel = (node.attr("rel") ?? "").trim().toLowerCase();
+  const className = (node.attr("class") ?? "").trim().toLowerCase();
+  return /\b(next|suivant|volgende|weiter|older|more)\b/.test(`${text} ${aria} ${rel} ${className}`);
 }
 
 function toAbsolute(raw: string, base: URL): string | null {

@@ -31,6 +31,25 @@ describe("findNextPageUrl", () => {
     expect(findNextPageUrl($, BASE, new Set())).toBeNull();
   });
 
+  it("does not treat broad nav containers as pagination", () => {
+    const $ = load(`
+      <nav aria-label="Pagination">
+        <a href="/">Accueil</a>
+        <a href="/collections">Femmes</a>
+        <a href="/search">Rechercher</a>
+      </nav>`);
+    expect(findNextPageUrl($, BASE, new Set())).toBeNull();
+  });
+
+  it("still accepts an explicit next control inside a pagination container", () => {
+    const $ = load(`
+      <nav aria-label="Pagination">
+        <a href="?page=1">1</a>
+        <a href="?page=2" aria-label="Next page">Suivant</a>
+      </nav>`);
+    expect(findNextPageUrl($, BASE, new Set())).toBe("https://shop.example/collections/all?page=2");
+  });
+
   it("skips already-visited URLs", () => {
     const $ = load(`<a rel="next" href="/collections/all?page=2">next</a>`);
     const visited = new Set(["https://shop.example/collections/all?page=2"]);
