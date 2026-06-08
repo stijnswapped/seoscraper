@@ -13,6 +13,7 @@ import { assertDomainAllowed, safeCollectionRedirectTarget, validateAndNormalize
 import { withBrowserSession } from "./pageLoader.js";
 import { buildRealisticHeaders, fetchDirect, isBlockedResponse, isProxyConfigured, isProxyRotating, proxyFetch } from "./antiBlock.js";
 import { crawlPages, resolveMaxPages } from "./pagination.js";
+import { enrichListingItemsWithSeo } from "./listingSeoEnrichment.js";
 import type { ProgressReporter } from "./progressHub.js";
 import {
   createSnapshot,
@@ -28,6 +29,12 @@ interface TrackListingInput {
   maxProducts: number;
   maxPages?: number;
   progress?: ProgressReporter;
+  /**
+   * Fetch each best-seller's product page to capture the REAL page SEO title
+   * (and the rest of the SEO set, which is free once the page is fetched). Off
+   * by default: it's one extra proxy request per product, so it's opt-in.
+   */
+  enrichSeo?: boolean;
 }
 
 interface ExtractionResult {
@@ -61,6 +68,17 @@ export async function trackListing(input: TrackListingInput): Promise<ListingRan
   const extraction = await extractListingItems(url, strategy, maxProducts, maxPages, progress);
   if (extraction.items.length === 0) {
     throw new CheckError("NO_PRODUCT_DATA_FOUND", "No product ranking items were found for this listing.");
+  }
+
+  // Replace each item's grid-derived `titleSeo` with the REAL product-page SEO
+  // title before the snapshot is persisted, so it's stored and returned in the
+  // existing `title` + `titleSeo` shape. Opt-in: one fetch per product.
+  if (input.enrichSeo) {
+    const seo = await enrichListingItemsWithSeo(extraction.items, progress);
+    extraction.rawMetadata = { ...extraction.rawMetadata, seoEnriched: seo.enriched, seoFailed: seo.failed };
+    if (seo.failed > 0) {
+      extraction.warnings.push(`Could not read the SEO title for ${seo.failed} of ${extraction.items.length} products.`);
+    }
   }
 
   const trackedListingId = await upsertTrackedListing({

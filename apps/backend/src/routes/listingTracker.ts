@@ -18,8 +18,10 @@ const trackListingBodySchema = z.object({
   maxProducts: z.number().int().positive().max(250).optional(),
   maxPages: z.number().int().positive().optional(),
   runId: z.string().min(1).optional(),
-  // Accepted for backwards compatibility but ignored: rank tracking is lean and
-  // never triggers the heavy per-product scrape. Use /api/check-product for that.
+  // Opt-in: fetch each best-seller's product page to capture the REAL page SEO
+  // title (populates item.seo). One extra proxy request per product, so it's off
+  // by default to keep rank tracking lean. This is a lightweight HTML fetch (no
+  // browser, no disk writes) — distinct from the heavy /api/check-product scrape.
   enrich: z.boolean().optional(),
 });
 
@@ -51,10 +53,12 @@ export function registerListingTrackerRoutes(app: FastifyInstance): void {
         maxProducts: parsed.data.maxProducts ?? 150,
         maxPages: parsed.data.maxPages,
         progress,
+        enrichSeo: parsed.data.enrich ?? false,
       });
 
       // Rank tracking is lean and DB-only: return the ranking + day-over-day
-      // changes immediately. No per-product enrichment / disk writes here.
+      // changes immediately. With `enrich`, each item also carries the real page
+      // SEO title in `result.items[].seo` (already fetched inline above).
       finishProgress(parsed.data.runId);
 
       return reply.send({ success: true, result, enriching: false });
