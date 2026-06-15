@@ -705,3 +705,119 @@ select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 4px
 
 .invite-grid--link { grid-template-columns: 1.6fr 0.7fr auto; }
 @media (max-width: 560px) { .invite-grid--link { grid-template-columns: 1fr; } }
+
+/* ===== Dashboard redesign — full-width, minimal, heavy type ============== */
+
+.shell { min-height: 100%; }
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px clamp(20px, 5vw, 40px);
+  background: rgba(247, 247, 251, 0.72);
+  backdrop-filter: saturate(180%) blur(12px);
+  border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 9px; font-weight: 800; font-size: 1.05rem; letter-spacing: -0.02em; }
+.brand .mark { color: var(--accent); font-size: 1.15rem; margin: 0; line-height: 1; }
+.topnav { display: flex; gap: 8px; }
+
+.pill {
+  border: none;
+  background: #f0f0f4;
+  color: var(--text);
+  border-radius: 999px;
+  padding: 9px 17px;
+  font: inherit;
+  font-weight: 650;
+  font-size: 0.85rem;
+  cursor: pointer;
+  text-decoration: none;
+  line-height: 1.2;
+  transition: background 0.16s ease;
+}
+.pill:hover { background: #e7e7ee; }
+
+.page {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: clamp(28px, 5vw, 48px) clamp(20px, 5vw, 40px) 110px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.page-head h1 { font-size: clamp(2rem, 5vw, 2.75rem); font-weight: 800; letter-spacing: -0.045em; margin: 0 0 4px; }
+.page-head .muted { font-size: 0.95rem; }
+
+/* Pill buttons everywhere (override the earlier squared style) */
+.btn {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 11px 22px;
+  font-weight: 650;
+  background: #16161c;
+  color: #fff;
+}
+.btn:hover { filter: none; background: #000; }
+.btn-ghost { background: #f0f0f4; color: var(--text); border-color: transparent; }
+.btn-ghost:hover { background: #e7e7ee; filter: none; }
+
+.panel {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  box-shadow: var(--shadow);
+  padding: clamp(20px, 3vw, 28px);
+}
+.panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.eyebrow { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.09em; color: var(--accent); }
+.panel-head h2 { font-size: 1.4rem; font-weight: 800; letter-spacing: -0.025em; margin: 3px 0 0; }
+.panel .muted { margin-top: 8px; max-width: 60ch; }
+.panel .row { margin-top: 18px; }
+
+.metric-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 20px 0 6px; }
+.metric { background: #fafafe; border: 1px solid var(--line); border-radius: 16px; padding: 18px 20px; }
+.metric b { display: block; font-size: 2.1rem; font-weight: 800; letter-spacing: -0.035em; line-height: 1; }
+.metric span { font-size: 0.78rem; color: var(--muted); }
+
+.segmented.period { background: #f0f0f4; }
+
+/* Clean data tables (keys + logs) */
+.data-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 0.875rem; }
+.data-table th {
+  text-align: left;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  padding: 0 10px 10px;
+}
+.data-table td { padding: 13px 10px; border-top: 1px solid var(--line); vertical-align: middle; }
+.data-table th:last-child, .data-table td:last-child { text-align: right; }
+.data-table code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  background: #f4f4f8;
+  padding: 2px 7px;
+  border-radius: 6px;
+}
+.data-table tr.revoked { opacity: 0.45; }
+.data-table .when, .data-table .muted-cell { color: var(--muted); font-variant-numeric: tabular-nums; }
+.data-table td.empty { text-align: center; color: var(--muted); padding: 26px 10px; }
+
+.status { display: inline-flex; align-items: center; font-size: 0.74rem; font-weight: 700; padding: 4px 11px; border-radius: 999px; }
+.status.ok { background: var(--ok-soft); color: var(--ok); }
+.status.bad { background: var(--down-soft); color: var(--down); }
+
+.btn-link.danger { color: var(--down); }
+.btn-link.danger:hover { opacity: 0.7; }
+
+@media (max-width: 640px) {
+  .metric-row { grid-template-columns: 1fr; }
+  .topbar { padding: 14px 18px; }
+}
