@@ -2,14 +2,19 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import { requireSession, requireAdminSession, SESSION_COOKIE } from "../services/apiAuth.js";
 import {
+  createInvite,
   createSession,
   createUser,
   getUserById,
   getUserWithPasswordByEmail,
+  getValidInviteByTokenHash,
   insertApiKey,
   listApiKeys,
+  listInvites,
   listUsers,
+  markInviteUsed,
   revokeApiKey,
+  revokeInvite,
   revokeSession,
   setUserProxyEncrypted,
   getUsageDaily,
@@ -19,7 +24,9 @@ import {
   decryptSecret,
   encryptSecret,
   generateApiKey,
+  generateInviteToken,
   generateSessionToken,
+  hashInviteToken,
   hashPassword,
   hashSessionToken,
   verifyPassword,
@@ -31,16 +38,22 @@ import { createLogger } from "../utils/logger.js";
 const log = createLogger("auth");
 
 const SESSION_TTL_DAYS = 7;
+const INVITE_TTL_DAYS = 7;
 
 const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
 });
 
-const createUserSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(8, "password must be at least 8 characters"),
+const inviteSchema = z.object({
+  email: z.string().email().optional(),
   role: z.enum(["user", "admin"]).optional(),
+});
+
+const signupSchema = z.object({
+  token: z.string().min(1),
+  email: z.string().email().optional(),
+  password: z.string().min(8, "password must be at least 8 characters"),
 });
 
 const apiKeySchema = z.object({ label: z.string().trim().max(120).optional() });
@@ -70,6 +83,15 @@ function setSessionCookie(reply: FastifyReply, token: string): void {
   });
 }
 
+/** Create a login session for a user, set the cookie, and return the token. */
+async function issueSession(reply: FastifyReply, userId: string): Promise<string> {
+  const { token, tokenHash } = generateSessionToken();
+  const expiresAt = new Date(Date.now() + SESSION_TTL_DAYS * 24 * 60 * 60 * 1000);
+  await createSession({ userId, tokenHash, expiresAt });
+  setSessionCookie(reply, token);
+  return token;
+}
+
 export function registerAuthRoutes(app: FastifyInstance): void {
   // Guard the whole accounts feature behind a configured database.
   const dbRequired = (reply: FastifyReply): boolean => {
@@ -91,17 +113,54 @@ export function registerAuthRoutes(app: FastifyInstance): void {
       return bad(reply, "INVALID_CREDENTIALS", "Invalid email or password.", 401);
     }
 
-    const { token, tokenHash } = generateSessionToken();
-    const expiresAt = new Date(Date.now() + SESSION_TTL_DAYS * 24 * 60 * 60 * 1000);
-    await createSession({ userId: found.user.id, tokenHash, expiresAt });
-    setSessionCookie(reply, token);
     // Also return the token so a cross-domain frontend can send it as an
     // X-Session-Token header (third-party cookies are blocked in Safari/ITP).
+    const token = await issueSession(reply, found.user.id);
     return reply.send({
       success: true,
       token,
       user: { id: found.user.id, email: found.user.email, role: found.user.role },
     });
+  });
+
+  // --- Invite-based signup (one-time link; no open registration) ------------
+
+  // Public: check an invite link so the signup page can prefill/validate.
+  app.get("/api/auth/invite/:token", async (request, reply) => {
+    if (dbRequired(reply)) return;
+    const token = (request.params as { token: string }).token;
+    const invite = await getValidInviteByTokenHash(hashInviteToken(token));
+    if (!invite) return reply.send({ success: true, valid: false });
+    return reply.send({ success: true, valid: true, email: invite.email, role: invite.role });
+  });
+
+  // Public: create an account from a one-time invite, then sign in.
+  app.post("/api/auth/signup", async (request, reply) => {
+    if (dbRequired(reply)) return;
+    const parsed = signupSchema.safeParse(request.body);
+    if (!parsed.success) return bad(reply, "INVALID_BODY", parsed.error.issues[0]?.message ?? "Invalid body.");
+
+    const invite = await getValidInviteByTokenHash(hashInviteToken(parsed.data.token));
+    if (!invite) return bad(reply, "INVALID_INVITE", "This invite link is invalid, expired, or already used.", 410);
+
+    const email = (invite.email ?? parsed.data.email)?.trim().toLowerCase();
+    if (!email) return bad(reply, "EMAIL_REQUIRED", "An email is required to sign up.");
+
+    let userId: string;
+    try {
+      userId = await createUser({ email, passwordHash: hashPassword(parsed.data.password), role: invite.role });
+    } catch (err) {
+      if (/unique/i.test((err as Error).message)) return bad(reply, "EMAIL_TAKEN", "That email already has an account.", 409);
+      throw err;
+    }
+
+    // Consume the invite (single-use). If it lost a race, the account still
+    // exists, but the link won't work again either way.
+    await markInviteUsed(invite.id, userId);
+    log.info("account created from invite", { userId, email, role: invite.role });
+
+    const token = await issueSession(reply, userId);
+    return reply.send({ success: true, token, user: { id: userId, email, role: invite.role } });
   });
 
   app.post("/api/auth/logout", async (request, reply) => {
@@ -215,20 +274,32 @@ export function registerAuthRoutes(app: FastifyInstance): void {
     return reply.send({ success: true, days, events: await getUsageEvents(id, days, clampLimit(q.limit)) });
   });
 
-  app.post("/api/admin/users", { preHandler: requireAdminSession }, async (request, reply) => {
-    const parsed = createUserSchema.safeParse(request.body);
+  // Generate a one-time signup link. Returns the token ONCE (only its hash is
+  // stored); the admin copies the link and sends it to the person, who creates
+  // their own account. The link stops working once an account is created from it.
+  app.post("/api/admin/invites", { preHandler: requireAdminSession }, async (request, reply) => {
+    const parsed = inviteSchema.safeParse(request.body ?? {});
     if (!parsed.success) return bad(reply, "INVALID_BODY", parsed.error.issues[0]?.message ?? "Invalid body.");
-    try {
-      const id = await createUser({
-        email: parsed.data.email,
-        passwordHash: hashPassword(parsed.data.password),
-        role: parsed.data.role ?? "user",
-      });
-      log.info("user created", { id, email: parsed.data.email, role: parsed.data.role ?? "user" });
-      return reply.send({ success: true, user: { id, email: parsed.data.email.toLowerCase(), role: parsed.data.role ?? "user" } });
-    } catch (err) {
-      if (/unique/i.test((err as Error).message)) return bad(reply, "EMAIL_TAKEN", "That email already has an account.", 409);
-      throw err;
-    }
+    const { token, tokenHash } = generateInviteToken();
+    const expiresAt = new Date(Date.now() + INVITE_TTL_DAYS * 24 * 60 * 60 * 1000);
+    await createInvite({
+      tokenHash,
+      email: parsed.data.email?.trim().toLowerCase() ?? null,
+      role: parsed.data.role ?? "user",
+      createdBy: request.auth!.userId,
+      expiresAt,
+    });
+    return reply.send({ success: true, token, expiresAt: expiresAt.toISOString() });
+  });
+
+  app.get("/api/admin/invites", { preHandler: requireAdminSession }, async (_request, reply) => {
+    return reply.send({ success: true, invites: await listInvites() });
+  });
+
+  app.delete("/api/admin/invites/:id", { preHandler: requireAdminSession }, async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const ok = await revokeInvite(id);
+    if (!ok) return bad(reply, "NOT_FOUND", "Invite not found or already used.", 404);
+    return reply.send({ success: true });
   });
 }

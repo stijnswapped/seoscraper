@@ -4,13 +4,16 @@ import {
   BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid,
 } from "recharts";
 import {
-  adminCreateUser,
+  adminCreateInvite,
+  adminListInvites,
   adminListUsers,
+  adminRevokeInvite,
   adminUserEvents,
   adminUserUsage,
   getMe,
   type AdminUser,
   type ApiError,
+  type Invite,
   type UsageDailyPoint,
   type UsageEvent,
 } from "../api.js";
@@ -30,11 +33,17 @@ export function Admin() {
   const [notice, setNotice] = useState<string | null>(null);
 
   // Invite form
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [role, setRole] = useState<"user" | "admin">("user");
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<"user" | "admin">("user");
+  const [invites, setInvites] = useState<Invite[]>([]);
+  const [generatedLink, setGeneratedLink] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
-  const loadUsers = async () => setUsers((await adminListUsers()).users);
+  const loadAccounts = async () => {
+    const [u, inv] = await Promise.all([adminListUsers(), adminListInvites()]);
+    setUsers(u.users);
+    setInvites(inv.invites);
+  };
 
   useEffect(() => {
     getMe()
@@ -43,7 +52,7 @@ export function Admin() {
           navigate("/dashboard");
           return;
         }
-        return loadUsers();
+        return loadAccounts();
       })
       .catch(() => navigate("/login"));
   }, []);
@@ -65,19 +74,40 @@ export function Admin() {
     return { ok, failed, total: ok + failed };
   }, [usage]);
 
-  const onInvite = async () => {
+  const onCreateInvite = async () => {
     setError(null);
     setNotice(null);
+    setCopied(false);
     try {
-      await adminCreateUser(email.trim(), password, role);
-      setNotice(`Invited ${email.trim()}.`);
-      setEmail("");
-      setPassword("");
-      setRole("user");
-      await loadUsers();
+      const res = await adminCreateInvite(inviteEmail.trim() || null, inviteRole);
+      setGeneratedLink(`${window.location.origin}/signup?token=${res.token}`);
+      setInviteEmail("");
+      setInviteRole("user");
+      await loadAccounts();
     } catch (err) {
-      setError((err as ApiError).message ?? "Could not create user.");
+      setError((err as ApiError).message ?? "Could not create invite.");
     }
+  };
+
+  const onCopyLink = async () => {
+    if (!generatedLink) return;
+    try {
+      await navigator.clipboard.writeText(generatedLink);
+      setCopied(true);
+    } catch {
+      /* clipboard blocked — the link is still selectable */
+    }
+  };
+
+  const onRevokeInvite = (id: string) => {
+    setError(null);
+    setNotice(null);
+    adminRevokeInvite(id)
+      .then(() => {
+        setNotice("Invite revoked.");
+        return loadAccounts();
+      })
+      .catch((err) => setError((err as ApiError).message ?? "Could not revoke invite."));
   };
 
   return (
@@ -97,16 +127,54 @@ export function Admin() {
 
       <section className="card anim" style={{ animationDelay: "60ms" }}>
         <div className="section-head"><h2>Invite a user</h2></div>
-        <p className="muted">There's no open signup — create accounts here and share the credentials.</p>
-        <div className="invite-grid">
-          <input type="email" placeholder="email@customer.com" value={email} onChange={(e) => setEmail(e.target.value)} />
-          <input type="text" placeholder="temporary password (≥ 8 chars)" value={password} onChange={(e) => setPassword(e.target.value)} />
-          <select value={role} onChange={(e) => setRole(e.target.value as "user" | "admin")}>
+        <p className="muted">
+          Generate a one-time signup link and send it to the person — they set their own password. The link works once
+          and stops working after an account is created. Email is optional (leave blank to let them choose their own).
+        </p>
+
+        {generatedLink && (
+          <div className="banner reveal">
+            <strong>Copy this link and send it — it's shown only once.</strong>
+            <div className="copy-row">
+              <code className="key-reveal">{generatedLink}</code>
+              <button className="btn" onClick={onCopyLink}>{copied ? "Copied" : "Copy"}</button>
+            </div>
+          </div>
+        )}
+
+        <div className="invite-grid invite-grid--link">
+          <input type="email" placeholder="email@customer.com (optional)" value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} />
+          <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value as "user" | "admin")}>
             <option value="user">User</option>
             <option value="admin">Admin</option>
           </select>
-          <button className="btn" onClick={onInvite} disabled={!email.trim() || password.length < 8}>Invite</button>
+          <button className="btn" onClick={onCreateInvite}>Create invite link</button>
         </div>
+
+        {invites.length > 0 && (
+          <table className="key-table">
+            <thead>
+              <tr><th>Email</th><th>Role</th><th>Created</th><th>Status</th><th></th></tr>
+            </thead>
+            <tbody>
+              {invites.map((inv) => (
+                <tr key={inv.id} className={inv.status !== "pending" ? "revoked" : ""}>
+                  <td>{inv.email ?? <span className="muted">any</span>}</td>
+                  <td>{inv.role}</td>
+                  <td className="when">{fmtDay(inv.createdAt)}</td>
+                  <td>
+                    <span className={`chip ${inv.status === "pending" ? "on" : inv.status === "used" ? "" : "bad"}`}>{inv.status}</span>
+                  </td>
+                  <td>
+                    {inv.status === "pending"
+                      ? <button className="btn-link" onClick={() => onRevokeInvite(inv.id)}>Revoke</button>
+                      : <span className="muted">—</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </section>
 
       <section className="card anim" style={{ animationDelay: "120ms" }}>

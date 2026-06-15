@@ -702,3 +702,6 @@ select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 4px
   .invite-grid { grid-template-columns: 1fr; }
   .step-content code, .code-block { font-size: 0.74rem; }
 }
+
+.invite-grid--link { grid-template-columns: 1.6fr 0.7fr auto; }
+@media (max-width: 560px) { .invite-grid--link { grid-template-columns: 1fr; } }

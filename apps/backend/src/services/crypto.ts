@@ -153,4 +153,9 @@ export function hashSessionToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
+// Invite tokens are the same kind of opaque random secret as sessions (only the
+// hash is stored); aliased for call-site clarity.
+export const generateInviteToken = generateSessionToken;
+export const hashInviteToken = hashSessionToken;
+
 export { randomUUID };

@@ -251,6 +251,82 @@ export async function getUsageEvents(userId: string, days: number, limit: number
   }));
 }
 
+// --- Invites ----------------------------------------------------------------
+
+export interface InviteRecord {
+  id: string;
+  email: string | null;
+  role: "user" | "admin";
+  createdAt: string;
+  expiresAt: string;
+  usedAt: string | null;
+  status: "pending" | "used" | "expired";
+}
+
+export async function createInvite(input: {
+  tokenHash: string;
+  email: string | null;
+  role: "user" | "admin";
+  createdBy: string | null;
+  expiresAt: Date;
+}): Promise<string> {
+  const id = randomUUID();
+  await query(
+    `insert into invites (id, token_hash, email, role, created_by, expires_at)
+       values ($1, $2, $3, $4, $5, $6)`,
+    [id, input.tokenHash, input.email, input.role, input.createdBy, input.expiresAt],
+  );
+  return id;
+}
+
+/** A still-usable invite (not used, not expired) for this token hash, or null. */
+export async function getValidInviteByTokenHash(
+  tokenHash: string,
+): Promise<{ id: string; email: string | null; role: "user" | "admin" } | null> {
+  const res = await query<{ id: string; email: string | null; role: "user" | "admin" }>(
+    `select id, email, role from invites
+       where token_hash = $1 and used_at is null and expires_at > now()`,
+    [tokenHash],
+  );
+  return res.rows[0] ?? null;
+}
+
+/** Atomically consume an invite. Returns false if it was already used. */
+export async function markInviteUsed(id: string, userId: string): Promise<boolean> {
+  const res = await query(
+    `update invites set used_at = now(), used_user_id = $2 where id = $1 and used_at is null`,
+    [id, userId],
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
+export async function listInvites(): Promise<InviteRecord[]> {
+  const res = await query<{
+    id: string;
+    email: string | null;
+    role: "user" | "admin";
+    created_at: Date;
+    expires_at: Date;
+    used_at: Date | null;
+  }>(`select id, email, role, created_at, expires_at, used_at from invites order by created_at desc`);
+  const now = Date.now();
+  return res.rows.map((r) => ({
+    id: r.id,
+    email: r.email,
+    role: r.role,
+    createdAt: r.created_at.toISOString(),
+    expiresAt: r.expires_at.toISOString(),
+    usedAt: r.used_at?.toISOString() ?? null,
+    status: r.used_at ? "used" : r.expires_at.getTime() < now ? "expired" : "pending",
+  }));
+}
+
+/** Delete a still-pending invite (used invites are kept as a record). */
+export async function revokeInvite(id: string): Promise<boolean> {
+  const res = await query(`delete from invites where id = $1 and used_at is null`, [id]);
+  return (res.rowCount ?? 0) > 0;
+}
+
 export interface UsageDailyPoint {
   day: string;
   total: number;

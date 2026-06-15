@@ -430,12 +430,52 @@ export function adminListUsers(): Promise<{ success: true; users: AdminUser[] }>
   return authedJson("/api/admin/users");
 }
 
-export function adminCreateUser(
-  email: string,
-  password: string,
+export interface Invite {
+  id: string;
+  email: string | null;
+  role: "user" | "admin";
+  createdAt: string;
+  expiresAt: string;
+  usedAt: string | null;
+  status: "pending" | "used" | "expired";
+}
+
+/** Create a one-time signup invite. Returns the token ONCE (build the link client-side). */
+export function adminCreateInvite(
+  email: string | null,
   role: "user" | "admin",
-): Promise<{ success: true; user: AdminUser }> {
-  return authedJson("/api/admin/users", { method: "POST", body: JSON.stringify({ email, password, role }) });
+): Promise<{ success: true; token: string; expiresAt: string }> {
+  return authedJson("/api/admin/invites", {
+    method: "POST",
+    body: JSON.stringify({ ...(email ? { email } : {}), role }),
+  });
+}
+
+export function adminListInvites(): Promise<{ success: true; invites: Invite[] }> {
+  return authedJson("/api/admin/invites");
+}
+
+export function adminRevokeInvite(id: string): Promise<{ success: true }> {
+  return authedJson(`/api/admin/invites/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+// --- Public invite signup ---------------------------------------------------
+
+export function getInvite(token: string): Promise<{ success: true; valid: boolean; email?: string | null; role?: "user" | "admin" }> {
+  return authedJson(`/api/auth/invite/${encodeURIComponent(token)}`);
+}
+
+export async function signup(
+  token: string,
+  password: string,
+  email?: string,
+): Promise<{ success: true; user: AccountUser }> {
+  const res = await authedJson<{ success: true; user: AccountUser; token: string }>("/api/auth/signup", {
+    method: "POST",
+    body: JSON.stringify({ token, password, ...(email ? { email } : {}) }),
+  });
+  setSessionToken(res.token);
+  return res;
 }
 
 export function adminUserUsage(id: string, days = 30): Promise<{ success: true; days: number; daily: UsageDailyPoint[] }> {
