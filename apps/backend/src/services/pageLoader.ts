@@ -77,6 +77,26 @@ export interface LoadPageOptions {
   scrollProfile?: "product" | "listing";
 }
 
+/**
+ * Whether the headless browser should abort a request of this resource type to
+ * save bandwidth (extracted as a pure function so the policy is unit-testable).
+ *
+ * Blocks pixels/media we never parse (image/media/font) and optionally CSS, but
+ * NEVER document/script/xhr/fetch — those drive lazy grids and carry the actual
+ * data. Blocking an image's *bytes* doesn't remove its <img> tag, so image
+ * discovery (which reads attributes) and the separate DIRECT image download are
+ * unaffected.
+ */
+export function shouldBlockResource(
+  resourceType: string,
+  opts: { blockAssets: boolean; blockStylesheets: boolean },
+): boolean {
+  if (!opts.blockAssets) return false;
+  if (resourceType === "image" || resourceType === "media" || resourceType === "font") return true;
+  if (opts.blockStylesheets && resourceType === "stylesheet") return true;
+  return false;
+}
+
 const LISTING_PRODUCT_LINK_SELECTOR = 'a[href*="/products/"]';
 
 /** A browser session that can render multiple pages without relaunching Chromium. */
@@ -135,6 +155,20 @@ export async function withBrowserSession<T>(
     });
     // Hide the headless/automation tells before any site script runs.
     await context.addInitScript(STEALTH_INIT_SCRIPT);
+
+    // Drop bandwidth-heavy resources we never parse (images/media/fonts, and
+    // optionally CSS). This is the single biggest proxy-bytes saver: a rendered
+    // Shopify page is mostly assets, while SEO/rank extraction only needs the
+    // HTML/JSON. JS, XHR and fetch are kept so lazy/infinite-scroll grids and
+    // products.json-driven tiles still populate.
+    if (browser.blockAssets) {
+      await context.route("**/*", (route) => {
+        if (shouldBlockResource(route.request().resourceType(), browser)) {
+          return route.abort();
+        }
+        return route.continue();
+      });
+    }
 
     const session: BrowserSession = {
       async loadPage(url: string, opts?: LoadPageOptions): Promise<LoadedPage> {

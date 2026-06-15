@@ -69,6 +69,19 @@ export interface SitesConfig {
     maxConcurrency: number;
     /** Per-attempt timeout for chromium.launch() before we retry it. */
     launchTimeoutMs: number;
+    /**
+     * Abort image/media/font requests in the headless browser. SEO/rank
+     * extraction reads the DOM (links, <title>, JSON-LD, <img> attributes), so
+     * the rendered pixels are never needed — blocking them cuts proxy bytes
+     * ~70-90%. JS/XHR/fetch are kept so lazy/infinite-scroll grids still load.
+     */
+    blockAssets: boolean;
+    /**
+     * Also abort stylesheets (more aggressive). Off by default: a few themes use
+     * layout/visibility checks to trigger lazy-loading, so dropping CSS is the
+     * only block that can change what content appears.
+     */
+    blockStylesheets: boolean;
   };
 
   images: {
@@ -185,6 +198,8 @@ export const sitesConfig: SitesConfig = {
     viewport: { width: 1366, height: 1000 },
     maxConcurrency: envInt("BROWSER_MAX_CONCURRENCY", 1),
     launchTimeoutMs: envInt("BROWSER_LAUNCH_TIMEOUT_MS", 45000),
+    blockAssets: envBool("BLOCK_BROWSER_ASSETS", true),
+    blockStylesheets: envBool("BLOCK_BROWSER_STYLESHEETS", false),
   },
 
   // --- Image filtering & selection -----------------------------------------

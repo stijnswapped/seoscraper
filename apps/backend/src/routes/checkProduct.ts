@@ -40,6 +40,8 @@ import {
   type ProgressReporter,
 } from "../services/progressHub.js";
 import { requireApiKeyAuth } from "../services/apiAuth.js";
+import { runWithProxy, validateProxyOverride } from "../services/antiBlock.js";
+import { logUsage, proxySource } from "../services/usageLogger.js";
 import { runWithConcurrency } from "../utils/concurrency.js";
 
 const log = createLogger("checkProduct");
@@ -55,6 +57,13 @@ const bodySchema = z.object({
   runId: z.string().min(1).optional(),
   maxPages: z.number().int().positive().optional(),
   responseMode: z.enum(["full", "url"]).optional(),
+  // Optional per-request proxy overriding the env proxy for this scrape only.
+  proxy: z
+    .string()
+    .trim()
+    .min(1)
+    .refine((v) => validateProxyOverride(v) === null, (v) => ({ message: validateProxyOverride(v) ?? "invalid proxy" }))
+    .optional(),
 });
 
 interface ApiResult {
@@ -390,11 +399,19 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
     }
 
     const progress = createProgressReporter(parsed.data.runId);
+    // Proxy precedence: request `proxy` > account proxy > server env proxy.
+    const userProxy = request.auth?.proxyUrl ?? null;
+    const proxyOverride = parsed.data.proxy ?? userProxy ?? null;
+    const usedProxy = proxySource(parsed.data.proxy, userProxy);
+    const startedAt = Date.now();
     try {
       progress({ phase: "queued", message: "Check request accepted.", url: parsed.data.url });
-      const { result, fileBaseUrl, dataUrl } = await runCheck(parsed.data.url, progress);
+      const { result, fileBaseUrl, dataUrl } = await runWithProxy(proxyOverride, () =>
+        runCheck(parsed.data.url, progress),
+      );
       const publicFileBaseUrl = toPublicUrl(request, fileBaseUrl!);
       const publicDataUrl = toPublicUrl(request, dataUrl!);
+      await logUsage(request, { endpoint: "/api/check-product", status: 200, ok: true, durationMs: Date.now() - startedAt, usedProxy });
       if (parsed.data.responseMode === "url") {
         return reply.send({
           success: true,
@@ -410,6 +427,7 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
         const status = err.code === "DOMAIN_NOT_ALLOWED" || err.code === "INVALID_URL" ? 400 : 502;
         log.warn("check failed", { code: err.code, message: err.message });
         progress({ phase: "failed", message: err.message });
+        await logUsage(request, { endpoint: "/api/check-product", status, ok: false, durationMs: Date.now() - startedAt, usedProxy });
         return reply.status(status).send({
           success: false,
           error: { code: err.code, message: err.message },
@@ -417,6 +435,7 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
       }
       log.error("unexpected error", { message: (err as Error).message });
       progress({ phase: "failed", message: (err as Error).message || "An unexpected error occurred." });
+      await logUsage(request, { endpoint: "/api/check-product", status: 500, ok: false, durationMs: Date.now() - startedAt, usedProxy });
       return reply.status(500).send({
         success: false,
         error: {

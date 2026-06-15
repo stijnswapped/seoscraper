@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Link } from "react-router-dom";
 import {
   checkProduct,
   trackListing,
@@ -135,6 +136,7 @@ export function App() {
           <p className="subtitle">
             Pull SEO, product content &amp; images — or track best-seller rank — from your shop.
           </p>
+          <Link className="dash-link" to="/dashboard">Account &amp; usage →</Link>
         </header>
 
         <form className="console anim" style={{ animationDelay: "80ms" }} onSubmit={handleSubmit}>

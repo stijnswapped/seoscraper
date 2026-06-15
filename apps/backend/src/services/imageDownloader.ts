@@ -126,7 +126,14 @@ export async function downloadAndSelect(
   };
 }
 
-/** Fetch an image with a byte cap and a timeout. */
+/**
+ * Fetch an image with a byte cap and a timeout.
+ *
+ * Intentionally a DIRECT `fetch` (never `proxyFetch`): product-image CDNs don't
+ * IP-block the way storefront HTML does, and images are by far the heaviest
+ * payload — routing them through a metered residential proxy would dominate the
+ * bandwidth bill for no benefit. Keep this direct.
+ */
 async function fetchImage(
   url: string,
   maxBytes: number,
