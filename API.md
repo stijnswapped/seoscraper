@@ -94,6 +94,7 @@ stores a snapshot, and diffs it against the previous snapshot for that listing.
 | `maxPages` | integer | no | `10` | Max collection pages to walk. Positive integer. |
 | `runId` | string | no | — | Correlates with `GET /api/check-progress/:runId` SSE stream. |
 | `enrich` | boolean | no | — | DEPRECATED/IGNORED. Tracking never does per-product scraping. |
+| `proxy` | string | no | server default | Per-request proxy that overrides the server's `SCRAPE_PROXY_URL` for this scrape only (e.g. the customer's own residential proxy). Format `http://user:pass@host:port`. Rejected (`400`) if malformed or pointing at a loopback/private host. Credentials are never logged. |
 
 `sourceStrategy` semantics:
 - `"both"` / `"auto"` (recommended): best-selling **order** from server-rendered HTML
@@ -240,6 +241,7 @@ product metadata, downloads + dedupes images to disk, returns file URLs.
 | `url` | string | **yes** | — | A product URL (kind `"product"`) or a collection URL (kind `"collection"`, scrapes each product — heavy). |
 | `responseMode` | `"full" \| "url"` | no | `"full"` | `"full"` returns the whole result object; `"url"` returns only file links. |
 | `maxPages` | integer | no | `10` | Pages to crawl for a collection URL. |
+| `proxy` | string | no | server default | Per-request proxy overriding `SCRAPE_PROXY_URL` for this scrape only. Same format/validation/redaction as the tracker's `proxy` field above. |
 | `runId` | string | no | — | Correlates with the SSE progress stream. |
 
 ### Response `200` — `responseMode:"full"`

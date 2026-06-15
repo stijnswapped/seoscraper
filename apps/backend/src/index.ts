@@ -3,6 +3,7 @@ import { buildServer } from "./server.js";
 import { runMigrations } from "./db/migrate.js";
 import { getDatabaseUrl } from "./db/postgres.js";
 import { startStorageCleanup } from "./services/storageMaintenance.js";
+import { seedAdminUser } from "./services/adminSeed.js";
 import { createLogger } from "./utils/logger.js";
 
 const log = createLogger("server");
@@ -35,7 +36,12 @@ async function main(): Promise<void> {
   // while waiting for migrations to complete on a cold start.
   if (getDatabaseUrl()) {
     runMigrations()
-      .then(() => log.info("database migrations applied"))
+      .then(async () => {
+        log.info("database migrations applied");
+        // Bootstrap the first admin from env (no open signup). No-op if it
+        // already exists or the env vars are unset.
+        await seedAdminUser();
+      })
       .catch((err) =>
         log.error("database migration failed; listing tracker endpoints may not work", {
           message: (err as Error).message,

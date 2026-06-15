@@ -255,7 +255,7 @@ export type ListingResponse =
 
 export async function checkProduct(
   url: string,
-  opts?: { runId?: string; maxPages?: number; responseMode?: "full" | "url" },
+  opts?: { runId?: string; maxPages?: number; responseMode?: "full" | "url"; proxy?: string },
 ): Promise<CheckResponse> {
   const res = await fetch(apiUrl("/api/check-product"), {
     method: "POST",
@@ -265,6 +265,7 @@ export async function checkProduct(
       ...(opts?.runId ? { runId: opts.runId } : {}),
       ...(opts?.maxPages ? { maxPages: opts.maxPages } : {}),
       ...(opts?.responseMode ? { responseMode: opts.responseMode } : {}),
+      ...(opts?.proxy ? { proxy: opts.proxy } : {}),
     }),
   });
   return (await res.json()) as CheckResponse;
@@ -272,7 +273,7 @@ export async function checkProduct(
 
 export async function trackListing(
   url: string,
-  opts?: { runId?: string; enrich?: boolean; maxPages?: number; sourceStrategy?: string; maxProducts?: number },
+  opts?: { runId?: string; enrich?: boolean; maxPages?: number; sourceStrategy?: string; maxProducts?: number; proxy?: string },
 ): Promise<ListingResponse> {
   const res = await fetch(apiUrl("/api/listings/track"), {
     method: "POST",
@@ -284,6 +285,7 @@ export async function trackListing(
       ...(opts?.runId ? { runId: opts.runId } : {}),
       ...(opts?.enrich ? { enrich: true } : {}),
       ...(opts?.maxPages ? { maxPages: opts.maxPages } : {}),
+      ...(opts?.proxy ? { proxy: opts.proxy } : {}),
     }),
   });
   return (await res.json()) as ListingResponse;
@@ -291,4 +293,123 @@ export async function trackListing(
 
 export function createProgressSource(runId: string): EventSource {
   return new EventSource(apiUrl(`/api/check-progress/${encodeURIComponent(runId)}`));
+}
+
+// --- Accounts / dashboard ---------------------------------------------------
+
+export interface AccountUser {
+  id: string;
+  email: string;
+  role: "user" | "admin";
+  hasProxy?: boolean;
+}
+
+export interface ApiKeySummary {
+  id: string;
+  keyPrefix: string;
+  label: string | null;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+
+export interface UsageDailyPoint {
+  day: string;
+  total: number;
+  ok: number;
+  failed: number;
+}
+
+/** All account calls send the httpOnly session cookie. */
+async function authedJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(apiUrl(path), {
+    credentials: "include",
+    headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
+    ...init,
+  });
+  const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!res.ok || body.success === false) {
+    const err = (body.error as ApiError) ?? { code: String(res.status), message: "Request failed." };
+    throw err;
+  }
+  return body as T;
+}
+
+export function login(email: string, password: string): Promise<{ success: true; user: AccountUser }> {
+  return authedJson("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
+}
+
+export function logout(): Promise<{ success: true }> {
+  return authedJson("/api/auth/logout", { method: "POST" });
+}
+
+export function getMe(): Promise<{ success: true; user: AccountUser }> {
+  return authedJson("/api/auth/me");
+}
+
+export function listApiKeys(): Promise<{ success: true; keys: ApiKeySummary[] }> {
+  return authedJson("/api/account/api-keys");
+}
+
+export function createApiKey(label?: string): Promise<{ success: true; key: string; keyPrefix: string }> {
+  return authedJson("/api/account/api-keys", { method: "POST", body: JSON.stringify({ label }) });
+}
+
+export function revokeApiKey(id: string): Promise<{ success: true }> {
+  return authedJson(`/api/account/api-keys/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function setProxy(proxy: string | null): Promise<{ success: true; hasProxy: boolean }> {
+  return authedJson("/api/account/proxy", { method: "PUT", body: JSON.stringify({ proxy }) });
+}
+
+export function getUsage(days = 30): Promise<{ success: true; days: number; daily: UsageDailyPoint[] }> {
+  return authedJson(`/api/account/usage?days=${days}`);
+}
+
+export interface UsageEvent {
+  ts: string;
+  endpoint: string;
+  status: number | null;
+  ok: boolean;
+  durationMs: number | null;
+  usedProxy: string | null;
+}
+
+export function getEvents(days = 30, limit = 50): Promise<{ success: true; days: number; events: UsageEvent[] }> {
+  return authedJson(`/api/account/events?days=${days}&limit=${limit}`);
+}
+
+// --- Admin ------------------------------------------------------------------
+
+export interface AdminUser {
+  id: string;
+  email: string;
+  role: "user" | "admin";
+  hasProxy: boolean;
+  createdAt: string;
+}
+
+export function adminListUsers(): Promise<{ success: true; users: AdminUser[] }> {
+  return authedJson("/api/admin/users");
+}
+
+export function adminCreateUser(
+  email: string,
+  password: string,
+  role: "user" | "admin",
+): Promise<{ success: true; user: AdminUser }> {
+  return authedJson("/api/admin/users", { method: "POST", body: JSON.stringify({ email, password, role }) });
+}
+
+export function adminUserUsage(id: string, days = 30): Promise<{ success: true; days: number; daily: UsageDailyPoint[] }> {
+  return authedJson(`/api/admin/users/${encodeURIComponent(id)}/usage?days=${days}`);
+}
+
+export function adminUserEvents(
+  id: string,
+  days = 30,
+  limit = 100,
+): Promise<{ success: true; days: number; events: UsageEvent[] }> {
+  return authedJson(`/api/admin/users/${encodeURIComponent(id)}/events?days=${days}&limit=${limit}`);
 }
