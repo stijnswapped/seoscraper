@@ -320,11 +320,38 @@ export interface UsageDailyPoint {
   failed: number;
 }
 
-/** All account calls send the httpOnly session cookie. */
+// Session token (returned by login). Sent as X-Session-Token so the dashboard
+// works even when the frontend and backend are on different domains, where the
+// httpOnly session cookie would be a blocked third-party cookie.
+const SESSION_STORAGE = "seoscrape_session_token";
+
+export function getSessionToken(): string {
+  try {
+    return localStorage.getItem(SESSION_STORAGE) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function setSessionToken(value: string | null): void {
+  try {
+    if (value) localStorage.setItem(SESSION_STORAGE, value);
+    else localStorage.removeItem(SESSION_STORAGE);
+  } catch {
+    /* ignore storage failures */
+  }
+}
+
+/** Account calls send the session cookie AND the X-Session-Token header. */
 async function authedJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getSessionToken();
   const res = await fetch(apiUrl(path), {
     credentials: "include",
-    headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
+    headers: {
+      "content-type": "application/json",
+      ...(token ? { "X-Session-Token": token } : {}),
+      ...(init?.headers ?? {}),
+    },
     ...init,
   });
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -335,12 +362,21 @@ async function authedJson<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-export function login(email: string, password: string): Promise<{ success: true; user: AccountUser }> {
-  return authedJson("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
+export async function login(email: string, password: string): Promise<{ success: true; user: AccountUser }> {
+  const res = await authedJson<{ success: true; user: AccountUser; token: string }>("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+  setSessionToken(res.token);
+  return res;
 }
 
-export function logout(): Promise<{ success: true }> {
-  return authedJson("/api/auth/logout", { method: "POST" });
+export async function logout(): Promise<{ success: true }> {
+  try {
+    return await authedJson("/api/auth/logout", { method: "POST" });
+  } finally {
+    setSessionToken(null);
+  }
 }
 
 export function getMe(): Promise<{ success: true; user: AccountUser }> {

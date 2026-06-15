@@ -87,9 +87,16 @@ export async function requireApiKeyAuth(request: FastifyRequest, reply: FastifyR
   return deny(reply, "UNAUTHORIZED", "Invalid API key.");
 }
 
-/** Pre-handler for dashboard endpoints — requires a valid login session cookie. */
+/**
+ * Pre-handler for dashboard endpoints — requires a valid login session. Accepts
+ * the session token from the httpOnly cookie OR an `X-Session-Token` header. The
+ * header path is what makes the dashboard work when the frontend and backend are
+ * on different domains (cross-site cookies are blocked by Safari/ITP and, soon,
+ * other browsers).
+ */
 export async function requireSession(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-  const token = request.cookies?.[SESSION_COOKIE];
+  const headerToken = request.headers["x-session-token"];
+  const token = request.cookies?.[SESSION_COOKIE] ?? (Array.isArray(headerToken) ? headerToken[0] : headerToken);
   if (!token) return deny(reply, "UNAUTHENTICATED", "Not signed in.");
   try {
     const userId = await getUserIdForSession(hashSessionToken(token));

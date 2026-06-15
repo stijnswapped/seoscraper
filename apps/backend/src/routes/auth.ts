@@ -95,8 +95,11 @@ export function registerAuthRoutes(app: FastifyInstance): void {
     const expiresAt = new Date(Date.now() + SESSION_TTL_DAYS * 24 * 60 * 60 * 1000);
     await createSession({ userId: found.user.id, tokenHash, expiresAt });
     setSessionCookie(reply, token);
+    // Also return the token so a cross-domain frontend can send it as an
+    // X-Session-Token header (third-party cookies are blocked in Safari/ITP).
     return reply.send({
       success: true,
+      token,
       user: { id: found.user.id, email: found.user.email, role: found.user.role },
     });
   });

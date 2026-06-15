@@ -109,7 +109,7 @@ export function Dashboard() {
         </div>
         <div className="dash-actions">
           {user.role === "admin" && <Link className="btn btn-ghost" to="/admin">Admin</Link>}
-          <button className="btn btn-ghost" onClick={() => navigate("/")}>Scraper</button>
+          <button className="btn btn-ghost" onClick={() => navigate("/scrape")}>Scraper</button>
           <button className="btn btn-ghost" onClick={onSignOut}>Sign out</button>
         </div>
       </header>
