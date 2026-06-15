@@ -31,7 +31,8 @@ import {
   hashSessionToken,
   verifyPassword,
 } from "../services/crypto.js";
-import { normalizeProxyInput, validateProxyOverride } from "../services/antiBlock.js";
+import { normalizeProxyInput, validateProxyOverride, resolveProxyContext, buildRealisticHeaders } from "../services/antiBlock.js";
+import { ProxyAgent } from "undici";
 import { getDatabaseUrl } from "../db/postgres.js";
 import { createLogger } from "../utils/logger.js";
 
@@ -237,6 +238,80 @@ export function registerAuthRoutes(app: FastifyInstance): void {
     // Store the normalized URL (curl command → clean http://user:pass@host:port).
     await setUserProxyEncrypted(request.auth!.userId!, encryptSecret(normalizeProxyInput(raw)));
     return reply.send({ success: true, hasProxy: true });
+  });
+
+  app.post("/api/account/test-proxy", { preHandler: requireSession }, async (request, reply) => {
+    if (dbRequired(reply)) return;
+    const parsed = proxySchema.safeParse(request.body ?? {});
+    if (!parsed.success) return bad(reply, "INVALID_BODY", "Invalid body.");
+
+    // Resolve proxy URL to test:
+    // request body `proxy` > user's saved proxy
+    let rawProxy = parsed.data.proxy?.trim();
+    if (rawProxy === undefined) {
+      const user = await getUserById(request.auth!.userId!, decryptSecret);
+      if (user && user.proxyUrl) {
+        rawProxy = user.proxyUrl;
+      }
+    }
+
+    if (!rawProxy) {
+      return bad(reply, "PROXY_REQUIRED", "No proxy provided or saved to test.");
+    }
+
+    const err = validateProxyOverride(rawProxy);
+    if (err) return bad(reply, "INVALID_PROXY", err);
+
+    const normalizedProxy = normalizeProxyInput(rawProxy);
+    const context = resolveProxyContext(normalizedProxy);
+    if (!context.url) {
+      return bad(reply, "INVALID_PROXY", "Failed to resolve proxy URL.");
+    }
+
+    const dispatcher = new ProxyAgent(context.url);
+    const ips: string[] = [];
+    const errors: string[] = [];
+
+    // Run 3 sequential attempts
+    for (let i = 0; i < 3; i++) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 6000); // 6s timeout per request
+      try {
+        const res = await fetch("https://api.ipify.org?format=json", {
+          method: "GET",
+          dispatcher,
+          signal: ctrl.signal,
+          headers: buildRealisticHeaders(),
+        } as any);
+        clearTimeout(timer);
+        if (!res.ok) {
+          errors.push(`Attempt ${i + 1} failed: HTTP ${res.status}`);
+          continue;
+        }
+        const data = (await res.json()) as { ip?: string };
+        if (data && typeof data.ip === "string" && data.ip.trim()) {
+          ips.push(data.ip.trim());
+        } else {
+          errors.push(`Attempt ${i + 1} failed: Invalid response format`);
+        }
+      } catch (err) {
+        clearTimeout(timer);
+        errors.push(`Attempt ${i + 1} failed: ${(err as Error).message}`);
+      }
+    }
+
+    const working = ips.length > 0;
+    const uniqueIps = Array.from(new Set(ips));
+    const rotates = uniqueIps.length > 1;
+
+    return reply.send({
+      success: true,
+      working,
+      rotates,
+      ips,
+      uniqueIps,
+      errors,
+    });
   });
 
   // --- Usage ----------------------------------------------------------------

@@ -18,13 +18,20 @@ import {
   logout,
   revokeApiKey,
   setProxy,
+  testProxy,
+  trackListing,
+  createProgressSource,
   type AccountUser,
   type ApiError,
   type ApiKeySummary,
   type UsageDailyPoint,
   type UsageEvent,
+  type ProgressEvent,
+  type ListingRankSnapshot,
 } from "../api.js";
 import { ProxyHelpModal } from "../components/ProxyHelpModal.js";
+import { ProgressPanel } from "../components/ProgressPanel.js";
+import { ListingSummary } from "../components/ListingSummary.js";
 
 const PERIODS = [7, 30, 90] as const;
 
@@ -34,6 +41,12 @@ function fmtDay(iso: string): string {
 
 function fmtTime(iso: string): string {
   return new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function newRunId(): string {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 export function Dashboard() {
@@ -50,6 +63,22 @@ export function Dashboard() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Proxy test states
+  const [testingProxy, setTestingProxy] = useState(false);
+  const [proxyTestResult, setProxyTestResult] = useState<{
+    working: boolean;
+    rotates: boolean;
+    ips: string[];
+    uniqueIps: string[];
+    errors: string[];
+  } | null>(null);
+
+  // Tracker test states
+  const [testUrlInput, setTestUrlInput] = useState("");
+  const [testingTrack, setTestingTrack] = useState(false);
+  const [trackProgress, setTrackProgress] = useState<ProgressEvent[]>([]);
+  const [trackResult, setTrackResult] = useState<ListingRankSnapshot | null>(null);
 
   const refresh = async (d = days) => {
     const [me, k, u, e] = await Promise.all([getMe(), listApiKeys(), getUsage(d), getEvents(d, 50)]);
@@ -114,6 +143,67 @@ export function Dashboard() {
 
   const onSaveProxy = () =>
     handle(setProxy(proxyInput.trim() || null), proxyInput.trim() ? "Proxy saved." : "Proxy cleared.");
+
+  const onTestProxy = async () => {
+    setTestingProxy(true);
+    setProxyTestResult(null);
+    setError(null);
+    setNotice(null);
+    try {
+      const p = proxyInput.trim() || null;
+      const res = await testProxy(p);
+      setProxyTestResult(res);
+      if (res.working) {
+        setNotice(res.rotates ? "Proxy test succeeded: Connection works and rotates exit IPs!" : "Proxy test succeeded: Connection works (static IP).");
+      } else {
+        setError("Proxy test failed: Connection could not be established.");
+      }
+    } catch (err) {
+      setError((err as ApiError).message ?? "Proxy test failed.");
+    } finally {
+      setTestingProxy(false);
+    }
+  };
+
+  const onRunTestTrack = async () => {
+    if (!testUrlInput.trim() || testingTrack) return;
+    setTestingTrack(true);
+    setTrackProgress([]);
+    setTrackResult(null);
+    setError(null);
+    setNotice(null);
+
+    const runId = newRunId();
+    const source = createProgressSource(runId);
+    
+    source.onmessage = (event) => {
+      const p = JSON.parse(event.data) as ProgressEvent;
+      setTrackProgress((cur) => [...cur, p]);
+      if (p.phase === "complete" || p.phase === "failed") {
+        source.close();
+      }
+    };
+    source.onerror = () => {
+      source.close();
+    };
+
+    try {
+      const res = await trackListing(testUrlInput.trim(), { runId, enrich: false, maxPages: 1, maxProducts: 10 });
+      source.close();
+      if (res.success) {
+        setTrackResult(res.result);
+        setNotice("Test rank tracking completed successfully.");
+      } else {
+        setError(res.error.message ?? "Test rank tracking failed.");
+      }
+    } catch (err) {
+      source.close();
+      setError((err as Error).message ?? "Test rank tracking failed.");
+    } finally {
+      setTestingTrack(false);
+    }
+  };
+
   const onSignOut = () => logout().finally(() => navigate("/login"));
 
   if (!user) return <div className="shell"><div className="page"><p className="muted">Loading…</p></div></div>;
@@ -209,10 +299,105 @@ export function Dashboard() {
               onChange={(e) => setProxyInput(e.target.value)}
             />
             <button className="btn" onClick={onSaveProxy}>Save</button>
+            <button className="btn btn-ghost" onClick={onTestProxy} disabled={testingProxy}>
+              {testingProxy ? "Testing..." : "Test Connection"}
+            </button>
             {user.hasProxy && (
               <button className="btn btn-ghost" onClick={() => handle(setProxy(null), "Proxy cleared.")}>Clear</button>
             )}
           </div>
+
+          {testingProxy && (
+            <div style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 8 }} className="muted anim">
+              <span className="spinner" />
+              <span>Testing proxy connection (making 3 attempts to check rotation)...</span>
+            </div>
+          )}
+
+          {proxyTestResult && (
+            <div style={{ marginTop: 16, padding: 16, borderRadius: 16, border: "1px solid var(--line)", background: "#fcfcfe" }} className="anim">
+              <h3 style={{ margin: "0 0 10px", fontSize: "0.95rem", display: "flex", alignItems: "center", gap: 8 }}>
+                {proxyTestResult.working ? (
+                  <>
+                    <span style={{ color: "var(--ok)", fontWeight: 700 }}>✅ Working</span>
+                    <span className={`tag ${proxyTestResult.rotates ? "ok" : ""}`} style={{ fontSize: "0.7rem" }}>
+                      {proxyTestResult.rotates ? "🔄 Rotates IP" : "📌 Static IP"}
+                    </span>
+                  </>
+                ) : (
+                  <span style={{ color: "var(--down)", fontWeight: 700 }}>❌ Failed</span>
+                )}
+              </h3>
+              
+              {proxyTestResult.working && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <span style={{ fontSize: "0.74rem", fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                    Detected Exit IPs ({proxyTestResult.uniqueIps.length} unique):
+                  </span>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    {proxyTestResult.ips.map((ip, idx) => (
+                      <span key={idx} className="pill" style={{ fontFamily: "monospace", fontSize: "0.78rem" }}>
+                        Attempt {idx + 1}: <b>{ip}</b>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {proxyTestResult.errors.length > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  <span style={{ fontSize: "0.74rem", fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                    Connection Attempts Log:
+                  </span>
+                  <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: "var(--down)", fontSize: "0.82rem", lineHeight: 1.5 }}>
+                    {proxyTestResult.errors.map((err, idx) => (
+                      <li key={idx} style={{ margin: "2px 0" }}>{err}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+
+        {/* Best-Sellers Tracker Test ---------------------------------------- */}
+        <section className="panel anim">
+          <div className="panel-head">
+            <div>
+              <span className="eyebrow">Testing</span>
+              <h2>Best-sellers tracker test</h2>
+            </div>
+            <div className="section-head-actions">
+              <span className="chip">Authenticated Test</span>
+            </div>
+          </div>
+          <p className="muted">
+            Run a test best-seller rank tracking request. Uses your session credentials and active proxy.
+            This test is limited to the first page (max 10 products) for speed.
+          </p>
+          <div className="row">
+            <input
+              type="url"
+              placeholder="https://yourshop.com/collections/all?sort_by=best-selling"
+              value={testUrlInput}
+              onChange={(e) => setTestUrlInput(e.target.value)}
+            />
+            <button className="btn" onClick={onRunTestTrack} disabled={testingTrack}>
+              {testingTrack ? "Running Test..." : "Run Test Track →"}
+            </button>
+          </div>
+
+          {testingTrack && trackProgress.length > 0 && (
+            <div style={{ marginTop: 16 }}>
+              <ProgressPanel events={trackProgress} />
+            </div>
+          )}
+
+          {trackResult && (
+            <div style={{ marginTop: 16, maxHeight: 420, overflowY: "auto", border: "1px solid var(--line)", borderRadius: 16, padding: "8px 16px" }} className="anim">
+              <ListingSummary result={trackResult} />
+            </div>
+          )}
         </section>
 
         {/* API keys --------------------------------------------------------- */}

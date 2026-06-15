@@ -141,12 +141,12 @@ export function App() {
 
         <form className="console anim" style={{ animationDelay: "80ms" }} onSubmit={handleSubmit}>
           <label className="field">
-            <span>API key</span>
+            <span>API key (optional when logged in)</span>
             <input
               type="password"
               value={apiKey}
               onChange={(e) => setKey(e.target.value)}
-              placeholder="Paste your API key"
+              placeholder="Paste your API key or leave blank to use session"
               autoComplete="current-password"
             />
           </label>

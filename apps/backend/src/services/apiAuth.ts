@@ -62,7 +62,27 @@ export async function requireApiKeyAuth(request: FastifyRequest, reply: FastifyR
   }
 
   const apiKey = extractApiKey(request);
-  if (!apiKey) return deny(reply, "UNAUTHORIZED", "Missing API key.");
+  if (!apiKey) {
+    // Session fallback: allows logged-in dashboard users to scrape/track without copy-pasting API key.
+    const headerToken = request.headers["x-session-token"];
+    const token = request.cookies?.[SESSION_COOKIE] ?? (Array.isArray(headerToken) ? headerToken[0] : headerToken);
+    if (token) {
+      try {
+        const userId = await getUserIdForSession(hashSessionToken(token));
+        if (userId) {
+          const user = await getUserById(userId, decryptSecret);
+          if (user) {
+            request.auth = { userId: user.id, apiKeyId: null, proxyUrl: user.proxyUrl, isAdmin: user.role === "admin" };
+            return;
+          }
+        }
+      } catch (err) {
+        log.error("session lookup fallback failed", { message: (err as Error).message });
+        return deny(reply, "AUTH_ERROR", "Could not verify fallback session.", 500);
+      }
+    }
+    return deny(reply, "UNAUTHORIZED", "Missing API key or active session.");
+  }
 
   // Env admin key (operator backdoor / pre-accounts deployments).
   const expected = configuredApiKey();

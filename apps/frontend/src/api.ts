@@ -257,9 +257,15 @@ export async function checkProduct(
   url: string,
   opts?: { runId?: string; maxPages?: number; responseMode?: "full" | "url"; proxy?: string },
 ): Promise<CheckResponse> {
+  const token = getSessionToken();
   const res = await fetch(apiUrl("/api/check-product"), {
     method: "POST",
-    headers: { "content-type": "application/json", ...authHeaders() },
+    credentials: "include",
+    headers: {
+      "content-type": "application/json",
+      ...authHeaders(),
+      ...(token ? { "X-Session-Token": token } : {}),
+    },
     body: JSON.stringify({
       url,
       ...(opts?.runId ? { runId: opts.runId } : {}),
@@ -275,9 +281,15 @@ export async function trackListing(
   url: string,
   opts?: { runId?: string; enrich?: boolean; maxPages?: number; sourceStrategy?: string; maxProducts?: number; proxy?: string },
 ): Promise<ListingResponse> {
+  const token = getSessionToken();
   const res = await fetch(apiUrl("/api/listings/track"), {
     method: "POST",
-    headers: { "content-type": "application/json", ...authHeaders() },
+    credentials: "include",
+    headers: {
+      "content-type": "application/json",
+      ...authHeaders(),
+      ...(token ? { "X-Session-Token": token } : {}),
+    },
     body: JSON.stringify({
       url,
       sourceStrategy: opts?.sourceStrategy ?? "auto",
@@ -397,6 +409,22 @@ export function revokeApiKey(id: string): Promise<{ success: true }> {
 
 export function setProxy(proxy: string | null): Promise<{ success: true; hasProxy: boolean }> {
   return authedJson("/api/account/proxy", { method: "PUT", body: JSON.stringify({ proxy }) });
+}
+
+export interface ProxyTestResponse {
+  success: boolean;
+  working: boolean;
+  rotates: boolean;
+  ips: string[];
+  uniqueIps: string[];
+  errors: string[];
+}
+
+export function testProxy(proxy: string | null): Promise<ProxyTestResponse> {
+  return authedJson("/api/account/test-proxy", {
+    method: "POST",
+    body: JSON.stringify({ proxy }),
+  });
 }
 
 export function getUsage(days = 30): Promise<{ success: true; days: number; daily: UsageDailyPoint[] }> {
