@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid,
 } from "recharts";
@@ -18,7 +18,8 @@ import {
   type UsageDailyPoint,
   type UsageEvent,
 } from "../api.js";
-import { EventTable } from "./Dashboard.js";
+import { EventTable } from "../components/EventTable.js";
+import { PageHeader } from "../layout/PageHeader.js";
 
 const PERIODS = [7, 30, 90] as const;
 const fmtDay = (iso: string) => new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
@@ -54,7 +55,7 @@ export function Admin() {
     getMe()
       .then((me) => {
         if (me.user.role !== "admin") {
-          navigate("/dashboard");
+          navigate("/overview");
           return;
         }
         return loadAccounts();
@@ -140,16 +141,8 @@ export function Admin() {
   };
 
   return (
-    <div className="dashboard">
-      <header className="dash-head anim">
-        <div>
-          <h1>Admin</h1>
-          <span className="who">Manage accounts &amp; review usage</span>
-        </div>
-        <div className="dash-actions">
-          <Link className="btn btn-ghost" to="/dashboard">Dashboard</Link>
-        </div>
-      </header>
+    <>
+      <PageHeader title="Admin" subtitle="Manage accounts & review usage." />
 
       {error && <div className="banner error anim">{error}</div>}
       {notice && <div className="banner notice anim">{notice}</div>}
@@ -304,6 +297,6 @@ export function Admin() {
           <EventTable events={events} />
         </section>
       )}
-    </div>
+    </>
   );
 }

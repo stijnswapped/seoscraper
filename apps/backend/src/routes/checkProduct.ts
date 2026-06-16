@@ -448,9 +448,8 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
           durationMs: Date.now() - startedAt,
           usedProxy,
           units: billableUnits,
-          billable: true,
+          billable: false,
         });
-        await debitQuotaTopup(request.auth?.userId, quota.topupUnitsToDebit, "/api/check-product");
         return reply.status(status).send({
           success: false,
           error: { code: err.code, message: err.message },
@@ -465,9 +464,8 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
         durationMs: Date.now() - startedAt,
         usedProxy,
         units: billableUnits,
-        billable: true,
+        billable: false,
       });
-      await debitQuotaTopup(request.auth?.userId, quota.topupUnitsToDebit, "/api/check-product");
       return reply.status(500).send({
         success: false,
         error: {

@@ -15,7 +15,7 @@ export function Login() {
     setBusy(true);
     try {
       await login(email, password);
-      navigate("/dashboard");
+      navigate("/overview");
     } catch (err) {
       setError((err as ApiError).message ?? "Sign in failed.");
     } finally {

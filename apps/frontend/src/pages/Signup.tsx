@@ -39,7 +39,7 @@ export function Signup() {
     setBusy(true);
     try {
       await signup(token, password, pinnedEmail ? undefined : email);
-      navigate("/dashboard");
+      navigate("/overview");
     } catch (err) {
       setError((err as ApiError).message ?? "Sign up failed.");
     } finally {

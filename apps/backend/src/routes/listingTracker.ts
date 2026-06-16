@@ -112,9 +112,8 @@ export function registerListingTrackerRoutes(app: FastifyInstance): void {
           durationMs: Date.now() - startedAt,
           usedProxy,
           units: billableUnits,
-          billable: true,
+          billable: false,
         });
-        await debitQuotaTopup(request.auth?.userId, quota.topupUnitsToDebit, "/api/listings/track");
         return reply.status(status).send({ success: false, error: { code: err.code, message: err.message } });
       }
       await logUsage(request, {
@@ -124,9 +123,8 @@ export function registerListingTrackerRoutes(app: FastifyInstance): void {
         durationMs: Date.now() - startedAt,
         usedProxy,
         units: billableUnits,
-        billable: true,
+        billable: false,
       });
-      await debitQuotaTopup(request.auth?.userId, quota.topupUnitsToDebit, "/api/listings/track");
       return reply.status(500).send({
         success: false,
         error: {
