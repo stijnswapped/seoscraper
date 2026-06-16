@@ -79,10 +79,10 @@ const STEPS: Step[] = [
           <p>Go to the <Ext href={LINKS.residential}>Residential page</Ext> and choose a plan.</p>
           <PlanTable lang="en" />
           <p className="muted">
-            Recommendation: we used ~20 GB in 2–3 weeks <em>before</em> the new bandwidth savings — with image/font
+            Recommendation: we used ~20 GB in 2–3 weeks <em>before</em> the new bandwidth savings, with image/font
             blocking now on, <strong>10 GB</strong> is a comfortable starting point. You can always upgrade later.
           </p>
-          <p className="muted">Prices are excl. VAT — your total may be higher depending on VAT.</p>
+          <p className="muted">Prices are excl. VAT, your total may be higher depending on VAT.</p>
           <p>Then scroll down and pick a <strong>validity period</strong> before checking out.</p>
         </>
       ),
@@ -91,10 +91,10 @@ const STEPS: Step[] = [
           <p>Ga naar de <Ext href={LINKS.residential}>Residential-pagina</Ext> en kies een abonnement.</p>
           <PlanTable lang="nl" />
           <p className="muted">
-            Aanbeveling: we gebruikten ~20 GB in 2–3 weken <em>vóór</em> de nieuwe besparing — nu afbeeldingen/fonts
+            Aanbeveling: we gebruikten ~20 GB in 2–3 weken <em>vóór</em> de nieuwe besparing, nu afbeeldingen/fonts
             worden geblokkeerd is <strong>10 GB</strong> een prima startpunt. Upgraden kan altijd later.
           </p>
-          <p className="muted">Prijzen zijn excl. btw — je totaal kan hoger uitvallen door btw.</p>
+          <p className="muted">Prijzen zijn excl. btw, je totaal kan hoger uitvallen door btw.</p>
           <p>Scroll daarna naar beneden en kies een <strong>geldigheidsduur</strong> vóór het afrekenen.</p>
         </>
       ),
@@ -155,14 +155,14 @@ const STEPS: Step[] = [
         <>
           <p>Paste the <strong>whole curl command</strong> (or just the <code>user:pass@host:port</code> part) into the
             Proxy field and press <strong>Save</strong>. We'll clean it up automatically.</p>
-          <p>Then create an <strong>API key</strong> below — and you're ready to scrape on your own proxy.</p>
+          <p>Then create an <strong>API key</strong> below, and you're ready to scrape on your own proxy.</p>
         </>
       ),
       nl: (
         <>
           <p>Plak het <strong>volledige curl-commando</strong> (of alleen het <code>user:pass@host:port</code> deel) in
             het Proxy-veld en klik op <strong>Opslaan</strong>. Wij maken het automatisch netjes.</p>
-          <p>Maak daarna hieronder een <strong>API-sleutel</strong> aan — en je kunt scrapen via je eigen proxy.</p>
+          <p>Maak daarna hieronder een <strong>API-sleutel</strong> aan, en je kunt scrapen via je eigen proxy.</p>
         </>
       ),
     },

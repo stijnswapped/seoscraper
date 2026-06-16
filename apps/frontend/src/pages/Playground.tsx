@@ -128,7 +128,7 @@ export function Playground() {
 
   return (
     <>
-      <PageHeader title="Playground" subtitle="Pull SEO, product content & images — or track best-seller rank — from a shop." />
+      <PageHeader title="Playground" subtitle="Pull SEO, product content & images, or track best-seller rank, from a shop." />
 
       <form className="panel console anim" onSubmit={handleSubmit}>
         <div className="segmented" role="tablist" aria-label="Mode">

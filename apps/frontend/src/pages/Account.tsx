@@ -99,7 +99,7 @@ export function Account() {
           </div>
         </div>
         <p className="muted">
-          Used for your scrapes, overriding the server default. Stored encrypted — credentials are never logged or shown
+          Used for your scrapes, overriding the server default. Stored encrypted, credentials are never logged or shown
           back. Paste the Smartproxy <code>curl</code> command or just the URL.
         </p>
         <div className="row">

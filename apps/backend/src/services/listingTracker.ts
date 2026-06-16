@@ -285,7 +285,7 @@ async function extractFetchedHtmlListingItems(
 
     progress?.({
       phase: "scanning-pages",
-      message: `Best-sellers (fetched HTML${result.viaDirect ? ", direct retry" : ""}) — page ${page} · ${byKey.size} products`,
+      message: `Best-sellers (fetched HTML${result.viaDirect ? ", direct retry" : ""}), page ${page} · ${byKey.size} products`,
       current: page,
       total: maxPages,
     });

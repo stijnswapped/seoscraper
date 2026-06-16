@@ -52,7 +52,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("extractListingItems — auto browser retry on rotating proxy", () => {
+describe("extractListingItems, auto browser retry on rotating proxy", () => {
   it("retries browser HTML in auto mode when fetched HTML is empty and the first browser render has no products", async () => {
     mocks.proxyFetch.mockImplementation(async (input: string | URL) => {
       const url = input.toString();

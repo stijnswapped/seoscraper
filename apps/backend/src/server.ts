@@ -15,6 +15,21 @@ import { registerBillingRoutes } from "./routes/billing.js";
 export async function buildServer(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, bodyLimit: 1_048_576, trustProxy: true });
 
+  // Several endpoints legitimately POST with no body (early-access checkout,
+  // billing portal, logout) but the frontend still sends content-type:
+  // application/json. Fastify's default parser rejects an empty JSON body with a
+  // 400 (FST_ERR_CTP_EMPTY_JSON_BODY); treat empty/whitespace bodies as undefined.
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body, done) => {
+    const text = (body as string).trim();
+    if (!text) return done(null, undefined);
+    try {
+      done(null, JSON.parse(text));
+    } catch (err) {
+      (err as Error & { statusCode?: number }).statusCode = 400;
+      done(err as Error, undefined);
+    }
+  });
+
   // Open CORS for the public API. Auth is by API key (a bearer secret the caller
   // holds) or the `X-Session-Token` header for the dashboard — never an ambient
   // cookie. So credentials:false: we do NOT expose the session cookie cross-origin,

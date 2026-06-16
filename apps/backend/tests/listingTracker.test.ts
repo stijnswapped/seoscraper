@@ -42,7 +42,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("extractListingItems — plain-fetch HTML tier (auto)", () => {
+describe("extractListingItems, plain-fetch HTML tier (auto)", () => {
   it("preserves DOM order as best-selling rank without launching a browser", async () => {
     const order = ["mattis-1", "alaric", "bawelniana", "benjamin"];
     const fetchMock = vi.fn(async (input: string | URL) => {
@@ -444,7 +444,7 @@ function fetchHtmlPage1(html: string) {
   vi.stubGlobal("fetch", mock);
 }
 
-describe("extractListingItems — ranks the real grid, not menu/upsell links", () => {
+describe("extractListingItems, ranks the real grid, not menu/upsell links", () => {
   it.each(["data-section", "id"] as const)(
     "ignores an add-on-products upsell block above the grid (%s marker)",
     async (marker) => {
@@ -526,7 +526,7 @@ describe("extractListingItems — ranks the real grid, not menu/upsell links", (
   });
 });
 
-describe("extractListingItems — retries DIRECT when the proxied HTML fetch is blocked", () => {
+describe("extractListingItems, retries DIRECT when the proxied HTML fetch is blocked", () => {
   const ORIGINAL_PROXY = process.env.SCRAPE_PROXY_URL;
   afterEach(() => {
     if (ORIGINAL_PROXY === undefined) delete process.env.SCRAPE_PROXY_URL;
@@ -624,7 +624,7 @@ describe("extractListingItems — retries DIRECT when the proxied HTML fetch is 
   });
 });
 
-describe("extractListingItems — follows safe collection redirects (locale / www)", () => {
+describe("extractListingItems, follows safe collection redirects (locale / www)", () => {
   it("follows a locale-prefix redirect (e.g. /en-us) and ranks the real sorted grid", async () => {
     const order = ["best-1", "second-2", "third-3"];
     const fetchMock = vi.fn(async (input: string | URL) => {
@@ -703,7 +703,7 @@ describe("extractListingItems — follows safe collection redirects (locale / ww
   });
 });
 
-describe("extractListingItems — excludes cart add-ons / gift cards from ranks", () => {
+describe("extractListingItems, excludes cart add-ons / gift cards from ranks", () => {
   it("drops shipping-protection and gift-card handles from the grid", async () => {
     fetchHtmlPage1(collectionHtml(["shipping-protection", "real-product-1", "gift-card", "real-product-2"]));
     const url = new URL("https://shop.example/collections/all?sort_by=best-selling");
@@ -714,7 +714,7 @@ describe("extractListingItems — excludes cart add-ons / gift cards from ranks"
   });
 });
 
-describe("extractListingItems — shopify_json fallback warns about lost sort order", () => {
+describe("extractListingItems, shopify_json fallback warns about lost sort order", () => {
   it("flags order as unreliable when sort_by is present", async () => {
     const fetchMock = vi.fn(async (input: string | URL) => {
       const u = new URL(input.toString());

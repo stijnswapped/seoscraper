@@ -56,7 +56,7 @@ export async function crawlPages(
 
     options.progress?.({
       phase: "scanning-pages",
-      message: `${options.label ?? "Scanning"} — page ${pageNumber} of up to ${options.maxPages}`,
+      message: `${options.label ?? "Scanning"}, page ${pageNumber} of up to ${options.maxPages}`,
       url: page.finalUrl,
       current: pageNumber,
       total: options.maxPages,

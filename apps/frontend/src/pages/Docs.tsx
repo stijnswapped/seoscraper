@@ -46,7 +46,7 @@ function Endpoint({
 export function Docs() {
   return (
     <>
-      <PageHeader title="Docs" subtitle="Track Shopify best-sellers and scrape product data — from the UI or the API." />
+      <PageHeader title="Docs" subtitle="Track Shopify best-sellers and scrape product data, from the UI or the API." />
 
       <div className="docs">
         {/* Build with AI ------------------------------------------------- */}
@@ -56,7 +56,7 @@ export function Docs() {
             <h2>Let an AI wire up the integration for you</h2>
             <p>
               Copy the prompt below and paste it into Claude, Cursor, ChatGPT or any coding agent. It contains
-              everything the model needs — base URL, auth, endpoints, response shapes and the rules that matter — so it
+              everything the model needs, base URL, auth, endpoints, response shapes and the rules that matter, so it
               can build your integration in one shot. Just add your API key and describe what you want at the end.
             </p>
             <div className="ai-card-actions">
@@ -64,7 +64,7 @@ export function Docs() {
                 text={AI_PROMPT}
                 className="btn ai-copy"
                 label="🪄  Copy AI prompt"
-                copiedLabel="✓  Copied — paste into your AI"
+                copiedLabel="✓  Copied, paste into your AI"
               />
               <a className="btn btn-ghost" href="#reference">Read the reference</a>
             </div>
@@ -106,7 +106,7 @@ export function Docs() {
               <div className="step-content">
                 <h3>Get an API key &amp; automate</h3>
                 <p>
-                  <b>API keys → Create key</b> (shown once). Send it as <code>x-api-key</code> on every request — or
+                  <b>API keys → Create key</b> (shown once). Send it as <code>x-api-key</code> on every request, or
                   skip the manual work and hand the AI prompt above to your coding agent.
                 </p>
               </div>
@@ -168,7 +168,7 @@ x-api-key: <API_KEY>
 content-type: application/json
 
 { "url": "https://yourshop.com/products/linen-dress", "responseMode": "full" }`} />
-            <p className="muted">Hosted files are temporary (~7 days) — download anything you want to keep.</p>
+            <p className="muted">Hosted files are temporary (~7 days), download anything you want to keep.</p>
           </Endpoint>
 
           <Endpoint
@@ -189,7 +189,7 @@ es.onmessage = (e) => console.log(JSON.parse(e.data)); // { phase, message, curr
           <h3 className="doc-subhead">Core concepts</h3>
           <ul className="doc-notes">
             <li>
-              <b>Identity:</b> match products on the stable <code>productKey</code> (<code>"handle:&lt;handle&gt;"</code>) — never on <code>title</code>.
+              <b>Identity:</b> match products on the stable <code>productKey</code> (<code>"handle:&lt;handle&gt;"</code>), never on <code>title</code>.
             </li>
             <li>
               <b>First run:</b> a listing's first run has no baseline, so every change is <code>direction:"new"</code>. Real diffs begin on run 2.

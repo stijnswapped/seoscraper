@@ -73,7 +73,7 @@ export function ApiKeys() {
       <section className="panel anim">
         {newKey && (
           <div className="banner reveal">
-            <strong>Copy your new key now — it won't be shown again.</strong>
+            <strong>Copy your new key now, it won't be shown again.</strong>
             <div className="copy-row">
               <code className="key-reveal">{newKey}</code>
               <button className="btn" onClick={() => onCopy(newKey)}>

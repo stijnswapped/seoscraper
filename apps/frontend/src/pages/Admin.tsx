@@ -150,13 +150,13 @@ export function Admin() {
       <section className="card anim" style={{ animationDelay: "60ms" }}>
         <div className="section-head"><h2>Invite a user</h2></div>
         <p className="muted">
-          Generate a one-time signup link and send it to the person — they set their own password. The link works once
+          Generate a one-time signup link and send it to the person, they set their own password. The link works once
           and stops working after an account is created. Email is optional (leave blank to let them choose their own).
         </p>
 
         {generatedLink && (
           <div className="banner reveal">
-            <strong>Copy this link and send it — it's shown only once.</strong>
+            <strong>Copy this link and send it, it's shown only once.</strong>
             <div className="copy-row">
               <code className="key-reveal">{generatedLink}</code>
               <button className="btn" onClick={onCopyLink}>{copied ? "Copied" : "Copy"}</button>
