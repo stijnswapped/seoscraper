@@ -7,6 +7,7 @@ import { runWithProxy, validateProxyOverride } from "../services/antiBlock.js";
 import { logUsage, proxySource } from "../services/usageLogger.js";
 import { CheckError } from "../types/productCheck.js";
 import type { ErrorCode } from "../types/productCheck.js";
+import { checkQuota, debitQuotaTopup, denyOverLimit, estimateListingUnits } from "../services/billing.js";
 import {
   getLatestSnapshot,
   getSnapshotItems,
@@ -53,6 +54,13 @@ export function registerListingTrackerRoutes(app: FastifyInstance): void {
       });
     }
 
+    const billableUnits = estimateListingUnits({
+      maxProducts: parsed.data.maxProducts ?? 150,
+      enrich: parsed.data.enrich ?? false,
+    });
+    const quota = await checkQuota(request.auth?.userId, billableUnits);
+    if (!quota.allowed) return denyOverLimit(reply, quota.overview, billableUnits);
+
     const progress = createProgressReporter(parsed.data.runId);
     // Proxy precedence: explicit request `proxy` > the account's stored proxy >
     // the server's env proxy. So a customer's own proxy is used automatically.
@@ -81,17 +89,44 @@ export function registerListingTrackerRoutes(app: FastifyInstance): void {
       // changes immediately. With `enrich`, each item also carries the real page
       // SEO title in `result.items[].seo` (already fetched inline above).
       finishProgress(parsed.data.runId);
-      await logUsage(request, { endpoint: "/api/listings/track", status: 200, ok: true, durationMs: Date.now() - startedAt, usedProxy });
+      await logUsage(request, {
+        endpoint: "/api/listings/track",
+        status: 200,
+        ok: true,
+        durationMs: Date.now() - startedAt,
+        usedProxy,
+        units: billableUnits,
+        billable: true,
+      });
+      await debitQuotaTopup(request.auth?.userId, quota.topupUnitsToDebit, "/api/listings/track");
 
       return reply.send({ success: true, result, enriching: false });
     } catch (err) {
       finishProgress(parsed.data.runId);
       if (err instanceof CheckError) {
         const status = err.code === "DOMAIN_NOT_ALLOWED" || err.code === "INVALID_URL" ? 400 : 502;
-        await logUsage(request, { endpoint: "/api/listings/track", status, ok: false, durationMs: Date.now() - startedAt, usedProxy });
+        await logUsage(request, {
+          endpoint: "/api/listings/track",
+          status,
+          ok: false,
+          durationMs: Date.now() - startedAt,
+          usedProxy,
+          units: billableUnits,
+          billable: true,
+        });
+        await debitQuotaTopup(request.auth?.userId, quota.topupUnitsToDebit, "/api/listings/track");
         return reply.status(status).send({ success: false, error: { code: err.code, message: err.message } });
       }
-      await logUsage(request, { endpoint: "/api/listings/track", status: 500, ok: false, durationMs: Date.now() - startedAt, usedProxy });
+      await logUsage(request, {
+        endpoint: "/api/listings/track",
+        status: 500,
+        ok: false,
+        durationMs: Date.now() - startedAt,
+        usedProxy,
+        units: billableUnits,
+        billable: true,
+      });
+      await debitQuotaTopup(request.auth?.userId, quota.topupUnitsToDebit, "/api/listings/track");
       return reply.status(500).send({
         success: false,
         error: {

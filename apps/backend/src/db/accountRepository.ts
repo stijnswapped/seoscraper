@@ -185,11 +185,23 @@ export async function recordUsageEvent(input: {
   ok: boolean;
   durationMs: number;
   usedProxy: string;
+  units?: number;
+  billable?: boolean;
 }): Promise<void> {
   await query(
-    `insert into usage_events (user_id, api_key_id, endpoint, status, ok, duration_ms, used_proxy)
-       values ($1, $2, $3, $4, $5, $6, $7)`,
-    [input.userId, input.apiKeyId, input.endpoint, input.status, input.ok, input.durationMs, input.usedProxy],
+    `insert into usage_events (user_id, api_key_id, endpoint, status, ok, duration_ms, used_proxy, units, billable)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [
+      input.userId,
+      input.apiKeyId,
+      input.endpoint,
+      input.status,
+      input.ok,
+      input.durationMs,
+      input.usedProxy,
+      input.units ?? 1,
+      input.billable ?? true,
+    ],
   );
 }
 
@@ -199,13 +211,37 @@ export interface AdminUserRecord {
   role: "user" | "admin";
   hasProxy: boolean;
   createdAt: string;
+  planCode: string;
+  billingStatus: string;
+  manualPlanCode: string | null;
+  manualUnlimited: boolean;
 }
 
 /** All accounts, for the admin user picker. */
 export async function listUsers(): Promise<AdminUserRecord[]> {
-  const res = await query<{ id: string; email: string; role: "user" | "admin"; has_proxy: boolean; created_at: Date }>(
-    `select id, email, role, (proxy_url_encrypted is not null) as has_proxy, created_at
-       from users order by created_at`,
+  const res = await query<{
+    id: string;
+    email: string;
+    role: "user" | "admin";
+    has_proxy: boolean;
+    created_at: Date;
+    plan_code: string | null;
+    billing_status: string | null;
+    manual_plan_code: string | null;
+    manual_unlimited: boolean | null;
+  }>(
+    `select u.id,
+            u.email,
+            u.role,
+            (u.proxy_url_encrypted is not null) as has_proxy,
+            u.created_at,
+            b.plan_code,
+            b.billing_status,
+            b.manual_plan_code,
+            b.manual_unlimited
+       from users u
+       left join billing_entitlements b on b.user_id = u.id
+      order by u.created_at`,
   );
   return res.rows.map((r) => ({
     id: r.id,
@@ -213,6 +249,10 @@ export async function listUsers(): Promise<AdminUserRecord[]> {
     role: r.role,
     hasProxy: r.has_proxy,
     createdAt: r.created_at.toISOString(),
+    planCode: r.plan_code ?? "free",
+    billingStatus: r.billing_status ?? "free",
+    manualPlanCode: r.manual_plan_code,
+    manualUnlimited: r.manual_unlimited ?? false,
   }));
 }
 

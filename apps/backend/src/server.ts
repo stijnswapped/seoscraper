@@ -8,6 +8,7 @@ import { registerCheckProductRoute } from "./routes/checkProduct.js";
 import { registerListingTrackerRoutes } from "./routes/listingTracker.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerAuthRoutes } from "./routes/auth.js";
+import { registerBillingRoutes } from "./routes/billing.js";
 
 export async function buildServer(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, bodyLimit: 1_048_576, trustProxy: true });
@@ -30,6 +31,7 @@ export async function buildServer(): Promise<FastifyInstance> {
   registerListingTrackerRoutes(app);
   registerAdminRoutes(app);
   registerAuthRoutes(app);
+  registerBillingRoutes(app);
 
   return app;
 }

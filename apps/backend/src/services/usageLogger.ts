@@ -19,7 +19,15 @@ export function proxySource(requestProxy: string | undefined, userProxy: string 
  */
 export async function logUsage(
   request: FastifyRequest,
-  input: { endpoint: string; status: number | null; ok: boolean; durationMs: number; usedProxy: string },
+  input: {
+    endpoint: string;
+    status: number | null;
+    ok: boolean;
+    durationMs: number;
+    usedProxy: string;
+    units?: number;
+    billable?: boolean;
+  },
 ): Promise<void> {
   if (!getDatabaseUrl()) return;
   try {

@@ -8,6 +8,7 @@ import {
   adminListInvites,
   adminListUsers,
   adminRevokeInvite,
+  adminUpdateUserBilling,
   adminUserEvents,
   adminUserUsage,
   getMe,
@@ -31,6 +32,10 @@ export function Admin() {
   const [events, setEvents] = useState<UsageEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [manualPlan, setManualPlan] = useState<"free" | "starter" | "pro" | "scale" | "unlimited" | "">("");
+  const [manualReason, setManualReason] = useState("");
+  const [manualExpiresAt, setManualExpiresAt] = useState("");
+  const [creditAdjust, setCreditAdjust] = useState("");
 
   // Invite form
   const [inviteEmail, setInviteEmail] = useState("");
@@ -59,6 +64,10 @@ export function Admin() {
 
   useEffect(() => {
     if (!selected) return;
+    setManualPlan(selected.manualUnlimited ? "unlimited" : (selected.manualPlanCode as typeof manualPlan) ?? "");
+    setManualReason("");
+    setManualExpiresAt("");
+    setCreditAdjust("");
     setError(null);
     Promise.all([adminUserUsage(selected.id, days), adminUserEvents(selected.id, days, 100)])
       .then(([u, e]) => {
@@ -108,6 +117,26 @@ export function Admin() {
         return loadAccounts();
       })
       .catch((err) => setError((err as ApiError).message ?? "Could not revoke invite."));
+  };
+
+  const onSaveBilling = async () => {
+    if (!selected) return;
+    setError(null);
+    setNotice(null);
+    try {
+      await adminUpdateUserBilling(selected.id, {
+        manualPlanCode: manualPlan ? manualPlan : null,
+        manualUnlimited: manualPlan === "unlimited",
+        manualReason: manualReason.trim() || null,
+        manualExpiresAt: manualExpiresAt ? new Date(manualExpiresAt).toISOString() : null,
+        addCredits: creditAdjust.trim() ? Number(creditAdjust) : undefined,
+      });
+      setNotice("Billing access updated.");
+      await loadAccounts();
+      setCreditAdjust("");
+    } catch (err) {
+      setError((err as ApiError).message ?? "Could not update billing access.");
+    }
   };
 
   return (
@@ -187,6 +216,9 @@ export function Admin() {
                 <span className="user-meta">
                   {u.role === "admin" && <span className="chip">admin</span>}
                   {u.hasProxy && <span className="chip on">proxy</span>}
+                  <span className={`chip ${u.manualUnlimited || u.planCode !== "free" ? "on" : ""}`}>
+                    {u.manualUnlimited ? "unlimited" : u.manualPlanCode ?? u.planCode}
+                  </span>
                 </span>
               </button>
             </li>
@@ -209,6 +241,41 @@ export function Admin() {
             <div className="stat"><b>{totals.total}</b><span>Total</span></div>
             <div className="stat ok"><b>{totals.ok}</b><span>Successful</span></div>
             <div className="stat down"><b>{totals.failed}</b><span>Failed</span></div>
+          </div>
+
+          <div className="admin-billing-box">
+            <div className="section-head">
+              <h3>Billing override</h3>
+              <span className="muted">
+                Current: {selected.manualUnlimited ? "manual unlimited" : selected.manualPlanCode ? `manual ${selected.manualPlanCode}` : `${selected.planCode} (${selected.billingStatus})`}
+              </span>
+            </div>
+            <div className="billing-admin-grid">
+              <label className="field">
+                <span>Manual plan</span>
+                <select value={manualPlan} onChange={(e) => setManualPlan(e.target.value as typeof manualPlan)}>
+                  <option value="">No override</option>
+                  <option value="free">Free</option>
+                  <option value="starter">Starter</option>
+                  <option value="pro">Pro</option>
+                  <option value="scale">Scale</option>
+                  <option value="unlimited">Unlimited</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>Expires</span>
+                <input type="datetime-local" value={manualExpiresAt} onChange={(e) => setManualExpiresAt(e.target.value)} />
+              </label>
+              <label className="field">
+                <span>Add credits</span>
+                <input type="number" value={creditAdjust} onChange={(e) => setCreditAdjust(e.target.value)} placeholder="e.g. 500" />
+              </label>
+              <label className="field billing-reason">
+                <span>Reason</span>
+                <input type="text" value={manualReason} onChange={(e) => setManualReason(e.target.value)} placeholder="beta, partner, support credit" />
+              </label>
+              <button className="btn" onClick={onSaveBilling}>Save billing access</button>
+            </div>
           </div>
 
           {usage.length === 0 ? (

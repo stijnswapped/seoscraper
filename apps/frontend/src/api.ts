@@ -316,6 +316,50 @@ export interface AccountUser {
   hasProxy?: boolean;
 }
 
+export interface BillingPlan {
+  code: "free" | "starter" | "pro" | "scale" | "unlimited";
+  name: string;
+  priceEur: number;
+  limit5h: number | null;
+  limit7d: number | null;
+  description: string;
+}
+
+export interface TopupPack {
+  code: "boost_500" | "boost_2500" | "boost_10000";
+  name: string;
+  priceEur: number;
+  units: number;
+}
+
+export interface BillingOverview {
+  entitlement: {
+    userId: string;
+    planCode: BillingPlan["code"];
+    billingStatus: string;
+    polarCustomerId: string | null;
+    polarSubscriptionId: string | null;
+    polarProductId: string | null;
+    currentPeriodEnd: string | null;
+    manualPlanCode: BillingPlan["code"] | null;
+    manualUnlimited: boolean;
+    manualReason: string | null;
+    manualExpiresAt: string | null;
+  } | null;
+  effectivePlan: BillingPlan;
+  topupBalance: number;
+  usage: {
+    last5h: number;
+    last7d: number;
+    limit5h: number | null;
+    limit7d: number | null;
+    percent5h: number | null;
+    percent7d: number | null;
+  };
+  plans: BillingPlan[];
+  topups: TopupPack[];
+}
+
 export interface ApiKeySummary {
   id: string;
   keyPrefix: string;
@@ -444,6 +488,24 @@ export function getEvents(days = 30, limit = 50): Promise<{ success: true; days:
   return authedJson(`/api/account/events?days=${days}&limit=${limit}`);
 }
 
+export function getBilling(): Promise<{ success: true; billing: BillingOverview }> {
+  return authedJson("/api/account/billing");
+}
+
+export function createBillingCheckout(
+  kind: "subscription" | "topup",
+  code: string,
+): Promise<{ success: true; url: string }> {
+  return authedJson("/api/account/billing/checkout", {
+    method: "POST",
+    body: JSON.stringify({ kind, code }),
+  });
+}
+
+export function createBillingPortal(): Promise<{ success: true; url: string }> {
+  return authedJson("/api/account/billing/portal", { method: "POST" });
+}
+
 // --- Admin ------------------------------------------------------------------
 
 export interface AdminUser {
@@ -452,6 +514,10 @@ export interface AdminUser {
   role: "user" | "admin";
   hasProxy: boolean;
   createdAt: string;
+  planCode: string;
+  billingStatus: string;
+  manualPlanCode: string | null;
+  manualUnlimited: boolean;
 }
 
 export function adminListUsers(): Promise<{ success: true; users: AdminUser[] }> {
@@ -516,4 +582,20 @@ export function adminUserEvents(
   limit = 100,
 ): Promise<{ success: true; days: number; events: UsageEvent[] }> {
   return authedJson(`/api/admin/users/${encodeURIComponent(id)}/events?days=${days}&limit=${limit}`);
+}
+
+export function adminUpdateUserBilling(
+  id: string,
+  body: {
+    manualPlanCode?: BillingPlan["code"] | null;
+    manualUnlimited?: boolean;
+    manualReason?: string | null;
+    manualExpiresAt?: string | null;
+    addCredits?: number;
+  },
+): Promise<{ success: true; billing: BillingOverview }> {
+  return authedJson(`/api/admin/users/${encodeURIComponent(id)}/billing`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
 }

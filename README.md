@@ -539,6 +539,16 @@ API_KEY=<strong random secret>
 REQUIRE_API_KEY=true
 DATABASE_URL=<Postgres connection string>
 OUTPUT_DIR=/data/output
+FRONTEND_PUBLIC_URL=https://<frontend-host>
+BACKEND_PUBLIC_URL=https://<backend-host>
+POLAR_ACCESS_TOKEN=<polar access token>
+POLAR_WEBHOOK_SECRET=<polar webhook secret>
+POLAR_STARTER_PRODUCT_ID=<polar starter product id>
+POLAR_PRO_PRODUCT_ID=<polar pro product id>
+POLAR_SCALE_PRODUCT_ID=<polar scale product id>
+POLAR_TOPUP_500_PRODUCT_ID=<polar top-up product id>
+POLAR_TOPUP_2500_PRODUCT_ID=<polar top-up product id>
+POLAR_TOPUP_10000_PRODUCT_ID=<polar top-up product id>
 ```
 
 When `API_KEY` is set, protected API routes accept either:

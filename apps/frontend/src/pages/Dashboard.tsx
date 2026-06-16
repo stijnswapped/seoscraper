@@ -11,7 +11,10 @@ import {
 } from "recharts";
 import {
   createApiKey,
+  createBillingCheckout,
+  createBillingPortal,
   getEvents,
+  getBilling,
   getMe,
   getUsage,
   listApiKeys,
@@ -24,6 +27,7 @@ import {
   type AccountUser,
   type ApiError,
   type ApiKeySummary,
+  type BillingOverview,
   type UsageDailyPoint,
   type UsageEvent,
   type ProgressEvent,
@@ -55,6 +59,7 @@ export function Dashboard() {
   const [keys, setKeys] = useState<ApiKeySummary[]>([]);
   const [usage, setUsage] = useState<UsageDailyPoint[]>([]);
   const [events, setEvents] = useState<UsageEvent[]>([]);
+  const [billing, setBilling] = useState<BillingOverview | null>(null);
   const [days, setDays] = useState<number>(30);
   const [newKey, setNewKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -81,11 +86,12 @@ export function Dashboard() {
   const [trackResult, setTrackResult] = useState<ListingRankSnapshot | null>(null);
 
   const refresh = async (d = days) => {
-    const [me, k, u, e] = await Promise.all([getMe(), listApiKeys(), getUsage(d), getEvents(d, 50)]);
+    const [me, k, u, e, b] = await Promise.all([getMe(), listApiKeys(), getUsage(d), getEvents(d, 50), getBilling()]);
     setUser(me.user);
     setKeys(k.keys);
     setUsage(u.daily);
     setEvents(e.events);
+    setBilling(b.billing);
   };
 
   useEffect(() => {
@@ -206,6 +212,28 @@ export function Dashboard() {
 
   const onSignOut = () => logout().finally(() => navigate("/login"));
 
+  const onCheckout = async (kind: "subscription" | "topup", code: string) => {
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await createBillingCheckout(kind, code);
+      window.location.assign(res.url);
+    } catch (err) {
+      setError((err as ApiError).message ?? "Could not start checkout.");
+    }
+  };
+
+  const onPortal = async () => {
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await createBillingPortal();
+      window.location.assign(res.url);
+    } catch (err) {
+      setError((err as ApiError).message ?? "Could not open billing portal.");
+    }
+  };
+
   if (!user) return <div className="shell"><div className="page"><p className="muted">Loading…</p></div></div>;
 
   return (
@@ -222,11 +250,79 @@ export function Dashboard() {
       <main className="page">
         <div className="page-head anim">
           <h1>Overview</h1>
-          <p className="muted">{user.email}</p>
+          <p className="muted">
+            {user.email}
+            {billing && <span className="plan-inline"> · {billing.effectivePlan.name}</span>}
+          </p>
         </div>
 
         {error && <div className="banner error anim">{error}</div>}
         {notice && <div className="banner notice anim">{notice}</div>}
+
+        {billing && (
+          <section className="panel billing-panel anim">
+            <div className="panel-head">
+              <div>
+                <span className="eyebrow">Billing</span>
+                <h2>{billing.effectivePlan.name} plan</h2>
+              </div>
+              <div className="section-head-actions">
+                <span className={`chip${billing.effectivePlan.code !== "free" ? " on" : ""}`}>
+                  {billing.entitlement?.manualUnlimited ? "manual unlimited" : billing.entitlement?.billingStatus ?? "free"}
+                </span>
+                {billing.entitlement?.polarCustomerId && <button className="btn btn-ghost" onClick={onPortal}>Manage billing</button>}
+              </div>
+            </div>
+
+            <div className="billing-grid">
+              <UsageMeter label="Last 5 hours" used={billing.usage.last5h} limit={billing.usage.limit5h} percent={billing.usage.percent5h} />
+              <UsageMeter label="Last 7 days" used={billing.usage.last7d} limit={billing.usage.limit7d} percent={billing.usage.percent7d} />
+              <div className="usage-meter credit-meter">
+                <span>Top-up credits</span>
+                <b>{billing.topupBalance.toLocaleString()}</b>
+                <small>extra units available</small>
+              </div>
+            </div>
+
+            {Math.max(billing.usage.percent5h ?? 0, billing.usage.percent7d ?? 0) >= 80 && billing.effectivePlan.code !== "unlimited" && (
+              <div className="banner warn">
+                You are close to your rolling usage limit. Upgrade or add credits before the next larger run.
+              </div>
+            )}
+
+            <div className="pricing-grid">
+              {billing.plans.map((plan) => (
+                <div key={plan.code} className={`price-card${billing.effectivePlan.code === plan.code ? " current" : ""}`}>
+                  <div>
+                    <span className="eyebrow">{plan.name}</span>
+                    <h3>€{plan.priceEur}<small>/mo</small></h3>
+                    <p className="muted">{plan.description}</p>
+                  </div>
+                  <div className="price-limits">
+                    <span>{plan.limit5h?.toLocaleString() ?? "∞"} units / 5h</span>
+                    <span>{plan.limit7d?.toLocaleString() ?? "∞"} units / 7d</span>
+                  </div>
+                  <button
+                    className="btn"
+                    disabled={plan.code === "free" || billing.effectivePlan.code === plan.code}
+                    onClick={() => onCheckout("subscription", plan.code)}
+                  >
+                    {billing.effectivePlan.code === plan.code ? "Current plan" : plan.code === "free" ? "Included" : "Upgrade"}
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            <div className="topup-row">
+              {billing.topups.map((topup) => (
+                <button key={topup.code} className="topup-button" onClick={() => onCheckout("topup", topup.code)}>
+                  <b>{topup.units.toLocaleString()} units</b>
+                  <span>€{topup.priceEur}</span>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
 
         {/* Usage ------------------------------------------------------------ */}
         <section className="panel anim">
@@ -485,5 +581,22 @@ export function EventTable({ events }: { events: UsageEvent[] }) {
         ))}
       </tbody>
     </table>
+  );
+}
+
+function UsageMeter({ label, used, limit, percent }: { label: string; used: number; limit: number | null; percent: number | null }) {
+  const displayLimit = limit === null ? "∞" : limit.toLocaleString();
+  const pct = percent ?? 0;
+  return (
+    <div className="usage-meter">
+      <div className="meter-head">
+        <span>{label}</span>
+        <b>{used.toLocaleString()} / {displayLimit}</b>
+      </div>
+      <div className="meter-track" aria-label={`${label}: ${used} of ${displayLimit} units used`}>
+        <div className="meter-fill" style={{ width: limit === null ? "100%" : `${pct}%` }} />
+      </div>
+      <small>{limit === null ? "Unlimited" : `${Math.max(0, limit - used).toLocaleString()} units left`}</small>
+    </div>
   );
 }

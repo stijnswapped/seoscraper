@@ -43,6 +43,7 @@ import { requireApiKeyAuth } from "../services/apiAuth.js";
 import { runWithProxy, validateProxyOverride } from "../services/antiBlock.js";
 import { logUsage, proxySource } from "../services/usageLogger.js";
 import { runWithConcurrency } from "../utils/concurrency.js";
+import { checkQuota, debitQuotaTopup, denyOverLimit, estimateCheckProductUnits } from "../services/billing.js";
 
 const log = createLogger("checkProduct");
 const COLLECTION_PATH_PATTERNS = [
@@ -398,6 +399,10 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
       });
     }
 
+    const billableUnits = estimateCheckProductUnits();
+    const quota = await checkQuota(request.auth?.userId, billableUnits);
+    if (!quota.allowed) return denyOverLimit(reply, quota.overview, billableUnits);
+
     const progress = createProgressReporter(parsed.data.runId);
     // Proxy precedence: request `proxy` > account proxy > server env proxy.
     const userProxy = request.auth?.proxyUrl ?? null;
@@ -411,7 +416,16 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
       );
       const publicFileBaseUrl = toPublicUrl(request, fileBaseUrl!);
       const publicDataUrl = toPublicUrl(request, dataUrl!);
-      await logUsage(request, { endpoint: "/api/check-product", status: 200, ok: true, durationMs: Date.now() - startedAt, usedProxy });
+      await logUsage(request, {
+        endpoint: "/api/check-product",
+        status: 200,
+        ok: true,
+        durationMs: Date.now() - startedAt,
+        usedProxy,
+        units: billableUnits,
+        billable: true,
+      });
+      await debitQuotaTopup(request.auth?.userId, quota.topupUnitsToDebit, "/api/check-product");
       if (parsed.data.responseMode === "url") {
         return reply.send({
           success: true,
@@ -427,7 +441,16 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
         const status = err.code === "DOMAIN_NOT_ALLOWED" || err.code === "INVALID_URL" ? 400 : 502;
         log.warn("check failed", { code: err.code, message: err.message });
         progress({ phase: "failed", message: err.message });
-        await logUsage(request, { endpoint: "/api/check-product", status, ok: false, durationMs: Date.now() - startedAt, usedProxy });
+        await logUsage(request, {
+          endpoint: "/api/check-product",
+          status,
+          ok: false,
+          durationMs: Date.now() - startedAt,
+          usedProxy,
+          units: billableUnits,
+          billable: true,
+        });
+        await debitQuotaTopup(request.auth?.userId, quota.topupUnitsToDebit, "/api/check-product");
         return reply.status(status).send({
           success: false,
           error: { code: err.code, message: err.message },
@@ -435,7 +458,16 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
       }
       log.error("unexpected error", { message: (err as Error).message });
       progress({ phase: "failed", message: (err as Error).message || "An unexpected error occurred." });
-      await logUsage(request, { endpoint: "/api/check-product", status: 500, ok: false, durationMs: Date.now() - startedAt, usedProxy });
+      await logUsage(request, {
+        endpoint: "/api/check-product",
+        status: 500,
+        ok: false,
+        durationMs: Date.now() - startedAt,
+        usedProxy,
+        units: billableUnits,
+        billable: true,
+      });
+      await debitQuotaTopup(request.auth?.userId, quota.topupUnitsToDebit, "/api/check-product");
       return reply.status(500).send({
         success: false,
         error: {

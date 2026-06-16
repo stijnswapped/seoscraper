@@ -101,7 +101,7 @@ body {
   letter-spacing: 0.02em;
 }
 
-input {
+input, select {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -114,7 +114,7 @@ input {
 
 input::placeholder { color: #b6b6c0; }
 
-input:focus {
+input:focus, select:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 4px var(--accent-soft);
@@ -216,6 +216,162 @@ h3 { font-size: 0.95rem; margin: 0; display: flex; align-items: center; gap: 8px
 }
 .tag.ok { background: var(--ok-soft); color: var(--ok); }
 .tag.warn { background: var(--warn-soft); color: var(--warn); }
+
+/* ---- Billing ------------------------------------------------------------ */
+
+.plan-inline { color: var(--accent); font-weight: 700; }
+
+.billing-panel { display: flex; flex-direction: column; gap: 18px; }
+
+.billing-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.usage-meter {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fcfcfe;
+  padding: 14px;
+  min-width: 0;
+}
+
+.meter-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.meter-head span,
+.usage-meter > span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.meter-head b,
+.credit-meter b {
+  font-variant-numeric: tabular-nums;
+  font-size: 1rem;
+}
+
+.meter-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #ececf4;
+}
+
+.meter-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+.usage-meter small {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.credit-meter {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.credit-meter b {
+  display: block;
+  margin-top: 6px;
+  font-size: 1.55rem;
+}
+
+.pricing-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.price-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+}
+
+.price-card.current {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+
+.price-card h3 {
+  margin: 6px 0 8px;
+  font-size: 1.35rem;
+}
+
+.price-card h3 small {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.price-limits {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.topup-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.topup-button {
+  min-height: 54px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fafafe;
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  font: inherit;
+}
+
+.topup-button:hover { border-color: var(--accent); }
+
+.admin-billing-box {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fcfcfe;
+}
+
+.billing-admin-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.billing-reason { grid-column: span 3; }
 
 /* ---- Stats -------------------------------------------------------------- */
 
@@ -490,6 +646,7 @@ h3 { font-size: 0.95rem; margin: 0; display: flex; align-items: center; gap: 8px
 .banner { padding: 11px 14px; border-radius: 12px; font-size: 0.86rem; line-height: 1.5; }
 .banner.error { background: var(--down-soft); color: #991b1b; border: 1px solid rgba(220,38,38,0.22); }
 .banner.notice { background: var(--ok-soft); color: var(--ok); border: 1px solid rgba(22,163,74,0.22); }
+.banner.warn { background: var(--warn-soft); color: var(--warn); border: 1px solid rgba(180,83,9,0.22); }
 .banner.reveal { background: var(--accent-soft); color: var(--text); border: 1px solid rgba(79,70,229,0.2); }
 .banner.reveal strong { display: block; font-size: 0.8rem; margin-bottom: 8px; }
 .banner.reveal .copy-row { display: flex; gap: 8px; align-items: stretch; }
@@ -820,4 +977,30 @@ select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 4px
 @media (max-width: 640px) {
   .metric-row { grid-template-columns: 1fr; }
   .topbar { padding: 14px 18px; }
+}
+
+@media (max-width: 920px) {
+  .billing-grid,
+  .pricing-grid,
+  .topup-row,
+  .billing-admin-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+  .billing-reason { grid-column: span 2; }
+}
+
+@media (max-width: 640px) {
+  .billing-grid,
+  .pricing-grid,
+  .topup-row,
+  .billing-admin-grid {
+    grid-template-columns: 1fr;
+  }
+  .billing-reason { grid-column: auto; }
+  .panel-head,
+  .section-head-actions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .topup-button { min-height: 48px; }
 }
