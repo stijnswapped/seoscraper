@@ -166,22 +166,27 @@ export function registerBillingRoutes(app: FastifyInstance): void {
     const user = await getUserById(userId, decryptSecret);
     if (!user) return bad(reply, "NOT_FOUND", "Account not found.", 404);
 
-    const checkout = await polarRequest<{ url?: string; checkout_url?: string }>("/v1/checkouts", {
-      products: [productId],
-      customer_email: user.email,
-      customer_external_id: user.id,
-      success_url: frontendUrl("/dashboard?billing=success"),
-      metadata: { userId: user.id, kind: parsed.data.kind, code: parsed.data.code },
-    });
-    const url = checkout.url ?? checkout.checkout_url;
-    if (!url) return bad(reply, "CHECKOUT_FAILED", "Polar did not return a checkout URL.", 502);
-    return reply.send({ success: true, url });
+    try {
+      const checkout = await polarRequest<{ url?: string; checkout_url?: string }>("/v1/checkouts/", {
+        products: [productId],
+        customer_email: user.email,
+        external_customer_id: user.id,
+        success_url: frontendUrl("/dashboard?billing=success"),
+        metadata: { userId: user.id, kind: parsed.data.kind, code: parsed.data.code },
+      });
+      const url = checkout.url ?? checkout.checkout_url;
+      if (!url) return bad(reply, "CHECKOUT_FAILED", "Polar did not return a checkout URL.", 502);
+      return reply.send({ success: true, url });
+    } catch (err) {
+      log.error("polar checkout failed", { message: (err as Error).message, kind: parsed.data.kind, code: parsed.data.code });
+      return bad(reply, "POLAR_CHECKOUT_FAILED", (err as Error).message || "Could not create Polar checkout.", 502);
+    }
   });
 
   app.post("/api/account/billing/portal", { preHandler: requireSession }, async (request, reply) => {
     const overview = await getBillingOverview(currentUserId(request));
     if (!overview.entitlement?.polarCustomerId) return bad(reply, "NO_CUSTOMER", "No billing customer exists yet.", 404);
-    const session = await polarRequest<{ url?: string; portal_url?: string }>("/v1/customer-portal/sessions", {
+    const session = await polarRequest<{ url?: string; portal_url?: string }>("/v1/customer-portal/sessions/", {
       customer_id: overview.entitlement.polarCustomerId,
       return_url: frontendUrl("/dashboard"),
     });
