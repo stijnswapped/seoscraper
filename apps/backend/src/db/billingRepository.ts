@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { query } from "./postgres.js";
 
 export type PlanCode = "free" | "starter" | "pro" | "scale" | "unlimited";
@@ -161,4 +162,38 @@ export async function debitTopupCredits(input: {
     source: "usage_debit",
     note: input.note,
   });
+}
+
+// --- Early access (pre-launch) ----------------------------------------------
+
+export interface EarlyAccessSignup {
+  id: string;
+  email: string | null;
+  createdAt: string;
+}
+
+/** Record a paid early-access buyer. Idempotent on the Polar order id. */
+export async function recordEarlyAccessSignup(input: {
+  email: string | null;
+  providerOrderId: string | null;
+}): Promise<void> {
+  await query(
+    `insert into early_access_signups (id, email, provider_order_id)
+       values ($1, $2, $3)
+     on conflict (provider_order_id) where provider_order_id is not null do nothing`,
+    [randomUUID(), input.email, input.providerOrderId],
+  );
+}
+
+export async function listEarlyAccessSignups(limit = 500): Promise<EarlyAccessSignup[]> {
+  const res = await query<{ id: string; email: string | null; created_at: Date }>(
+    `select id, email, created_at from early_access_signups order by created_at desc limit $1`,
+    [limit],
+  );
+  return res.rows.map((r) => ({ id: r.id, email: r.email, createdAt: r.created_at.toISOString() }));
+}
+
+export async function countEarlyAccessSignups(): Promise<number> {
+  const res = await query<{ total: string }>(`select count(*)::text as total from early_access_signups`);
+  return Number(res.rows[0]?.total ?? 0);
 }

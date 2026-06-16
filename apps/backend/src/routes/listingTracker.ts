@@ -3,6 +3,7 @@ import { z } from "zod";
 import { trackListing, normalizeSourceStrategy } from "../services/listingTracker.js";
 import { createProgressReporter, finishProgress } from "../services/progressHub.js";
 import { requireApiKeyAuth } from "../services/apiAuth.js";
+import { scrapeRateLimit } from "../services/rateLimit.js";
 import { runWithProxy, validateProxyOverride } from "../services/antiBlock.js";
 import { logUsage, proxySource } from "../services/usageLogger.js";
 import { CheckError } from "../types/productCheck.js";
@@ -42,7 +43,7 @@ const listingParamsSchema = z.object({
 });
 
 export function registerListingTrackerRoutes(app: FastifyInstance): void {
-  app.post("/api/listings/track", { preHandler: requireApiKeyAuth }, async (request, reply) => {
+  app.post("/api/listings/track", { preHandler: requireApiKeyAuth, config: { rateLimit: scrapeRateLimit } }, async (request, reply) => {
     const parsed = trackListingBodySchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({
@@ -75,6 +76,8 @@ export function registerListingTrackerRoutes(app: FastifyInstance): void {
       const result = await runWithProxy(proxyOverride, () =>
         trackListing({
           url: parsed.data.url,
+          // Scope the listing + its snapshot history to the authenticated user.
+          userId: request.auth?.userId ?? null,
           // Default to "both": best-selling order from HTML + reliable title/image
           // from products.json. (auto also enriches, so any value gets titles.)
           sourceStrategy: normalizeSourceStrategy(parsed.data.sourceStrategy ?? "both"),
@@ -139,7 +142,7 @@ export function registerListingTrackerRoutes(app: FastifyInstance): void {
     const params = listingParamsSchema.safeParse(request.params);
     if (!params.success) return reply.status(400).send({ success: false, error: { code: "INVALID_URL", message: "Invalid listingId." } });
 
-    const listing = await getTrackedListing(params.data.listingId);
+    const listing = await getTrackedListing(params.data.listingId, request.auth?.userId ?? null);
     if (!listing) return reply.status(404).send({ success: false, error: { code: "NOT_FOUND", message: "Listing was not found." } });
 
     const snapshots = await getSnapshotsForListing(params.data.listingId, 50);
@@ -150,7 +153,7 @@ export function registerListingTrackerRoutes(app: FastifyInstance): void {
     const params = listingParamsSchema.safeParse(request.params);
     if (!params.success) return reply.status(400).send({ success: false, error: { code: "INVALID_URL", message: "Invalid listingId." } });
 
-    const listing = await getTrackedListing(params.data.listingId);
+    const listing = await getTrackedListing(params.data.listingId, request.auth?.userId ?? null);
     if (!listing) return reply.status(404).send({ success: false, error: { code: "NOT_FOUND", message: "Listing was not found." } });
 
     const latest = await getLatestSnapshot(params.data.listingId);

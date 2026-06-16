@@ -40,6 +40,7 @@ import {
   type ProgressReporter,
 } from "../services/progressHub.js";
 import { requireApiKeyAuth } from "../services/apiAuth.js";
+import { scrapeRateLimit } from "../services/rateLimit.js";
 import { runWithProxy, validateProxyOverride } from "../services/antiBlock.js";
 import { logUsage, proxySource } from "../services/usageLogger.js";
 import { runWithConcurrency } from "../utils/concurrency.js";
@@ -387,7 +388,7 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
     attachProgressClient(params.data.runId, reply);
   });
 
-  app.post("/api/check-product", { preHandler: requireApiKeyAuth }, async (request, reply) => {
+  app.post("/api/check-product", { preHandler: requireApiKeyAuth, config: { rateLimit: scrapeRateLimit } }, async (request, reply) => {
     const parsed = bodySchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({

@@ -130,6 +130,20 @@ export async function requireSession(request: FastifyRequest, reply: FastifyRepl
   }
 }
 
+/**
+ * Companion guard for scrape-style auth: run AFTER {@link requireApiKeyAuth} to
+ * require admin privileges. Lets the env `API_KEY` backdoor and admin accounts
+ * through (both resolve `isAdmin: true`) while rejecting regular API-key/session
+ * holders with 403. Used to gate operator maintenance endpoints that may be
+ * called by scripts with the env key rather than a browser session.
+ */
+export async function requireApiAdmin(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  if (reply.sent) return; // requireApiKeyAuth already denied the request
+  if (!request.auth?.isAdmin) {
+    return deny(reply, "FORBIDDEN", "Admin access required.", 403);
+  }
+}
+
 /** Pre-handler chain helper: require an authenticated ADMIN session. */
 export async function requireAdminSession(request: FastifyRequest, reply: FastifyReply): Promise<void> {
   await requireSession(request, reply);

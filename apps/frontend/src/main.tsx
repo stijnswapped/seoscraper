@@ -1,6 +1,7 @@
 import React, { type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { Landing } from "./pages/Landing.js";
 import { Login } from "./pages/Login.js";
 import { Signup } from "./pages/Signup.js";
 import { Admin } from "./pages/Admin.js";
@@ -26,8 +27,8 @@ createRoot(root).render(
   <React.StrictMode>
     <BrowserRouter>
       <Routes>
-        {/* Login is the entry point. Logged-in users skip straight to the app. */}
-        <Route path="/" element={<Navigate to={getSessionToken() ? "/overview" : "/login"} replace />} />
+        {/* Public landing at the root. Logged-in users skip straight to the app. */}
+        <Route path="/" element={getSessionToken() ? <Navigate to="/overview" replace /> : <Landing />} />
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
 

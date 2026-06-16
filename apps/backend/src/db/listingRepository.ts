@@ -52,18 +52,21 @@ export interface ListingSnapshotSummary {
 }
 
 export async function upsertTrackedListing(input: {
+  userId: string | null;
   storeDomain: string;
   listingKey: string;
   listingUrl: string;
 }): Promise<string> {
   const id = randomUUID();
+  // Conflict target mirrors the per-owner unique index in migration 006
+  // (COALESCE so ownerless rows still dedupe). One row per (owner, listing).
   const result = await query<TrackedListingRow>(
-    `insert into tracked_listings (id, store_domain, listing_key, listing_url)
-     values ($1, $2, $3, $4)
-     on conflict (store_domain, listing_key)
+    `insert into tracked_listings (id, user_id, store_domain, listing_key, listing_url)
+     values ($1, $2, $3, $4, $5)
+     on conflict (coalesce(user_id, '00000000-0000-0000-0000-000000000000'::uuid), store_domain, listing_key)
      do update set listing_url = excluded.listing_url
      returning id`,
-    [id, input.storeDomain, input.listingKey, input.listingUrl],
+    [id, input.userId, input.storeDomain, input.listingKey, input.listingUrl],
   );
   const trackedListingId = result.rows[0]?.id;
   if (!trackedListingId) throw new Error("Could not upsert tracked listing.");
@@ -99,7 +102,16 @@ export async function getLatestSnapshot(
   };
 }
 
-export async function getTrackedListing(trackedListingId: string): Promise<TrackedListingRecord | null> {
+/**
+ * Fetch a tracked listing by id. Pass `ownerId` (the authenticated user) to
+ * enforce ownership: a real user only sees their own listings, while a null
+ * `ownerId` (operator / env-key) is unrestricted. This closes the cross-tenant
+ * read on the /history and /latest endpoints.
+ */
+export async function getTrackedListing(
+  trackedListingId: string,
+  ownerId: string | null = null,
+): Promise<TrackedListingRecord | null> {
   const result = await query<{
     id: string;
     store_domain: string;
@@ -108,8 +120,8 @@ export async function getTrackedListing(trackedListingId: string): Promise<Track
   }>(
     `select id, store_domain, listing_key, listing_url
      from tracked_listings
-     where id = $1`,
-    [trackedListingId],
+     where id = $1 and ($2::uuid is null or user_id = $2)`,
+    [trackedListingId, ownerId],
   );
   const row = result.rows[0];
   if (!row) return null;

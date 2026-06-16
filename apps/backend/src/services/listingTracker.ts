@@ -25,6 +25,8 @@ import {
 
 interface TrackListingInput {
   url: string;
+  /** Owning user (from the authenticated key/session). null for operator/env-key runs. */
+  userId: string | null;
   sourceStrategy: ListingSourceStrategy;
   maxProducts: number;
   maxPages?: number;
@@ -82,6 +84,7 @@ export async function trackListing(input: TrackListingInput): Promise<ListingRan
   }
 
   const trackedListingId = await upsertTrackedListing({
+    userId: input.userId,
     storeDomain: hostname,
     listingKey,
     listingUrl: url.toString(),

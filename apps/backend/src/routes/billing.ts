@@ -4,10 +4,14 @@ import { z } from "zod";
 import { getUserById } from "../db/accountRepository.js";
 import {
   addCreditLedgerEntry,
+  countEarlyAccessSignups,
+  listEarlyAccessSignups,
+  recordEarlyAccessSignup,
   setManualBillingOverride,
   upsertBillingEntitlement,
   type PlanCode,
 } from "../db/billingRepository.js";
+import { getDatabaseUrl } from "../db/postgres.js";
 import { requireAdminSession, requireSession } from "../services/apiAuth.js";
 import {
   BILLING_PLANS,
@@ -69,6 +73,18 @@ function topupForProduct(productId: string | null | undefined): keyof typeof TOP
     if (process.env[topup.polarProductEnv] === productId) return topup.code;
   }
   return null;
+}
+
+/** The configured $5 pre-launch early-access product, or null if unset. */
+function earlyAccessProductId(): string | null {
+  return process.env.POLAR_EARLY_ACCESS_PRODUCT_ID?.trim() || null;
+}
+
+/** Best-effort extraction of the buyer's email from a Polar order payload. */
+function orderEmail(data: any): string | null {
+  const raw =
+    data?.customer?.email ?? data?.customer_email ?? data?.user?.email ?? data?.metadata?.email ?? null;
+  return typeof raw === "string" && raw.trim() ? raw.trim().toLowerCase() : null;
 }
 
 class PolarRequestError extends Error {
@@ -167,8 +183,20 @@ async function handleCustomerState(data: any): Promise<void> {
 }
 
 async function handleOrderPaid(data: any): Promise<void> {
-  const userId = metadataUserId(data);
   const productId = data?.product_id ?? data?.product?.id ?? data?.items?.[0]?.product_id ?? data?.items?.[0]?.product?.id;
+
+  // Pre-launch early access: anonymous $5 purchase, no account yet. Record the
+  // buyer's email so they can be invited + granted a Starter trial at launch.
+  const earlyId = earlyAccessProductId();
+  if (earlyId && productId === earlyId) {
+    await recordEarlyAccessSignup({
+      email: orderEmail(data),
+      providerOrderId: data?.id ?? data?.order_id ?? null,
+    });
+    return;
+  }
+
+  const userId = metadataUserId(data);
   const topupCode = topupForProduct(productId);
   if (!userId || !topupCode) return;
   const topup = TOPUP_PACKS[topupCode];
@@ -184,6 +212,43 @@ async function handleOrderPaid(data: any): Promise<void> {
 export function registerBillingRoutes(app: FastifyInstance): void {
   app.get("/api/account/billing", { preHandler: requireSession }, async (request, reply) => {
     return reply.send({ success: true, billing: publicBillingPayload(await getBillingOverview(currentUserId(request))) });
+  });
+
+  // --- Pre-launch early access (public, no account) -------------------------
+
+  // Start an anonymous $5 early-access checkout. Polar's hosted page collects the
+  // buyer's email + card; the webhook records them for onboarding at launch.
+  app.post("/api/early-access/checkout", async (_request, reply) => {
+    const productId = earlyAccessProductId();
+    if (!productId) return bad(reply, "PRODUCT_NOT_CONFIGURED", "Early access is not configured yet.", 503);
+    try {
+      const checkout = await polarRequest<{ url?: string; checkout_url?: string }>("/v1/checkouts/", {
+        products: [productId],
+        success_url: frontendUrl("/?early=success"),
+        metadata: { kind: "early_access" },
+      });
+      const url = checkout.url ?? checkout.checkout_url;
+      if (!url) return bad(reply, "CHECKOUT_FAILED", "Polar did not return a checkout URL.", 502);
+      return reply.send({ success: true, url });
+    } catch (err) {
+      const status = err instanceof PolarRequestError ? err.status : 502;
+      log.error("early access checkout failed", { message: (err as Error).message, status });
+      return reply.status(502).send({
+        success: false,
+        error: { code: "POLAR_CHECKOUT_FAILED", message: (err as Error).message || "Could not start checkout." },
+      });
+    }
+  });
+
+  // Public count for social proof on the landing page. Returns 0 without a DB.
+  app.get("/api/early-access/count", async (_request, reply) => {
+    if (!getDatabaseUrl()) return reply.send({ success: true, count: 0 });
+    return reply.send({ success: true, count: await countEarlyAccessSignups() });
+  });
+
+  // Admin: the list of early-access buyers to onboard at launch.
+  app.get("/api/admin/early-access", { preHandler: requireAdminSession }, async (_request, reply) => {
+    return reply.send({ success: true, signups: await listEarlyAccessSignups() });
   });
 
   app.post("/api/account/billing/checkout", { preHandler: requireSession }, async (request, reply) => {

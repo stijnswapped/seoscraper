@@ -259,9 +259,7 @@ export async function checkProduct(
 ): Promise<CheckResponse> {
   const token = getSessionToken();
   const res = await fetch(apiUrl("/api/check-product"), {
-    method: "POST",
-    credentials: "include",
-    headers: {
+    method: "POST",    headers: {
       "content-type": "application/json",
       ...authHeaders(),
       ...(token ? { "X-Session-Token": token } : {}),
@@ -283,9 +281,7 @@ export async function trackListing(
 ): Promise<ListingResponse> {
   const token = getSessionToken();
   const res = await fetch(apiUrl("/api/listings/track"), {
-    method: "POST",
-    credentials: "include",
-    headers: {
+    method: "POST",    headers: {
       "content-type": "application/json",
       ...authHeaders(),
       ...(token ? { "X-Session-Token": token } : {}),
@@ -398,12 +394,10 @@ function setSessionToken(value: string | null): void {
   }
 }
 
-/** Account calls send the session cookie AND the X-Session-Token header. */
+/** Account calls authenticate with the X-Session-Token header (no cross-origin cookie). */
 async function authedJson<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getSessionToken();
-  const res = await fetch(apiUrl(path), {
-    credentials: "include",
-    headers: {
+  const res = await fetch(apiUrl(path), {    headers: {
       "content-type": "application/json",
       ...(token ? { "X-Session-Token": token } : {}),
       ...(init?.headers ?? {}),
@@ -504,6 +498,32 @@ export function createBillingCheckout(
 
 export function createBillingPortal(): Promise<{ success: true; url: string }> {
   return authedJson("/api/account/billing/portal", { method: "POST" });
+}
+
+// --- Early access (public, pre-launch) --------------------------------------
+
+/** Start an anonymous $5 early-access checkout. Returns the Polar checkout URL. */
+export async function createEarlyAccessCheckout(): Promise<{ success: true; url: string }> {
+  const res = await fetch(apiUrl("/api/early-access/checkout"), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+  });
+  const body = (await res.json().catch(() => ({}))) as { success?: boolean; url?: string; error?: ApiError };
+  if (!res.ok || !body.success || !body.url) {
+    throw body.error ?? { code: String(res.status), message: "Could not start checkout." };
+  }
+  return { success: true, url: body.url };
+}
+
+/** Public count of early-access buyers (social proof). Best-effort; 0 on error. */
+export async function getEarlyAccessCount(): Promise<number> {
+  try {
+    const res = await fetch(apiUrl("/api/early-access/count"));
+    const body = (await res.json()) as { count?: number };
+    return body.count ?? 0;
+  } catch {
+    return 0;
+  }
 }
 
 // --- Admin ------------------------------------------------------------------

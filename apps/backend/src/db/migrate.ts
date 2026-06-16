@@ -18,6 +18,8 @@ export async function runMigrations(): Promise<void> {
     "003_accounts.sql",
     "004_invites.sql",
     "005_billing.sql",
+    "006_listing_owner.sql",
+    "007_early_access.sql",
   ];
   const migrationsDir = path.dirname(fileURLToPath(import.meta.url));
 

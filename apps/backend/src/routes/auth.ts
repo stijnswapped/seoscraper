@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import { requireSession, requireAdminSession, SESSION_COOKIE } from "../services/apiAuth.js";
+import { loginRateLimit } from "../services/rateLimit.js";
 import {
   createInvite,
   createSession,
@@ -103,7 +104,7 @@ export function registerAuthRoutes(app: FastifyInstance): void {
     return false;
   };
 
-  app.post("/api/auth/login", async (request, reply) => {
+  app.post("/api/auth/login", { config: { rateLimit: loginRateLimit } }, async (request, reply) => {
     if (dbRequired(reply)) return;
     const parsed = loginSchema.safeParse(request.body);
     if (!parsed.success) return bad(reply, "INVALID_BODY", parsed.error.issues[0]?.message ?? "Invalid body.");
