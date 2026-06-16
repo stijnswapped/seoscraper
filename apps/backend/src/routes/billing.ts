@@ -71,21 +71,52 @@ function topupForProduct(productId: string | null | undefined): keyof typeof TOP
   return null;
 }
 
-async function polarRequest<T>(path: string, body: unknown): Promise<T> {
+class PolarRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly details: unknown,
+  ) {
+    super(message);
+  }
+}
+
+async function polarRequest<T>(path: string, body?: unknown, method = "POST"): Promise<T> {
   const token = process.env.POLAR_ACCESS_TOKEN?.trim();
   if (!token) throw new Error("POLAR_ACCESS_TOKEN is not configured.");
   const base = process.env.POLAR_API_BASE_URL?.replace(/\/+$/, "") || "https://api.polar.sh";
   const res = await fetch(`${base}${path}`, {
-    method: "POST",
+    method,
     headers: {
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
+      accept: "application/json",
     },
-    body: JSON.stringify(body),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
-  const data = (await res.json().catch(() => ({}))) as T & { error?: string; message?: string };
-  if (!res.ok) throw new Error(data.message || data.error || `Polar request failed with ${res.status}`);
+  const data = (await res.json().catch(() => ({}))) as T & {
+    detail?: unknown;
+    error?: string;
+    message?: string;
+  };
+  if (!res.ok) {
+    throw new PolarRequestError(
+      data.message || data.error || summarizePolarDetail(data.detail) || `Polar request failed with ${res.status}`,
+      res.status,
+      data,
+    );
+  }
   return data;
+}
+
+function summarizePolarDetail(detail: unknown): string | null {
+  if (typeof detail === "string") return detail;
+  if (!Array.isArray(detail)) return null;
+  const first = detail[0] as { msg?: unknown; loc?: unknown } | undefined;
+  if (!first) return null;
+  const loc = Array.isArray(first.loc) ? first.loc.join(".") : "";
+  const msg = typeof first.msg === "string" ? first.msg : null;
+  return msg ? `${loc ? `${loc}: ` : ""}${msg}` : null;
 }
 
 function verifyPolarSignature(body: unknown, headers: Record<string, string | string[] | undefined>): boolean {
@@ -178,8 +209,27 @@ export function registerBillingRoutes(app: FastifyInstance): void {
       if (!url) return bad(reply, "CHECKOUT_FAILED", "Polar did not return a checkout URL.", 502);
       return reply.send({ success: true, url });
     } catch (err) {
-      log.error("polar checkout failed", { message: (err as Error).message, kind: parsed.data.kind, code: parsed.data.code });
-      return bad(reply, "POLAR_CHECKOUT_FAILED", (err as Error).message || "Could not create Polar checkout.", 502);
+      const status = err instanceof PolarRequestError ? err.status : 502;
+      const details = err instanceof PolarRequestError ? err.details : undefined;
+      log.error("polar checkout failed", {
+        message: (err as Error).message,
+        status,
+        kind: parsed.data.kind,
+        code: parsed.data.code,
+      });
+      return reply.status(502).send({
+        success: false,
+        error: {
+          code: "POLAR_CHECKOUT_FAILED",
+          message: (err as Error).message || "Could not create Polar checkout.",
+        },
+        polar: {
+          status,
+          details,
+          productEnvConfigured: Boolean(productId),
+          apiBaseUrl: process.env.POLAR_API_BASE_URL?.replace(/\/+$/, "") || "https://api.polar.sh",
+        },
+      });
     }
   });
 
