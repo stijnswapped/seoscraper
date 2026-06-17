@@ -49,7 +49,7 @@ export const BILLING_PLANS: Record<PlanCode, BillingPlan> = {
   pro: {
     code: "pro",
     name: "Pro",
-    priceEur: 49,
+    priceEur: 39,
     limit5h: 500,
     limit7d: 2500,
     polarProductEnv: "POLAR_PRO_PRODUCT_ID",
@@ -58,7 +58,7 @@ export const BILLING_PLANS: Record<PlanCode, BillingPlan> = {
   scale: {
     code: "scale",
     name: "Scale",
-    priceEur: 149,
+    priceEur: 129,
     limit5h: 2000,
     limit7d: 10000,
     polarProductEnv: "POLAR_SCALE_PRODUCT_ID",
@@ -78,21 +78,21 @@ export const TOPUP_PACKS: Record<TopupPack["code"], TopupPack> = {
   boost_500: {
     code: "boost_500",
     name: "Boost 500",
-    priceEur: 9,
+    priceEur: 8,
     units: 500,
     polarProductEnv: "POLAR_TOPUP_500_PRODUCT_ID",
   },
   boost_2500: {
     code: "boost_2500",
     name: "Boost 2,500",
-    priceEur: 29,
+    priceEur: 28,
     units: 2500,
     polarProductEnv: "POLAR_TOPUP_2500_PRODUCT_ID",
   },
   boost_10000: {
     code: "boost_10000",
     name: "Boost 10,000",
-    priceEur: 99,
+    priceEur: 98,
     units: 10000,
     polarProductEnv: "POLAR_TOPUP_10000_PRODUCT_ID",
   },
