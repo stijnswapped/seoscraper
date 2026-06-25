@@ -45,6 +45,14 @@ import { runWithProxy, validateProxyOverride } from "../services/antiBlock.js";
 import { logUsage, proxySource } from "../services/usageLogger.js";
 import { runWithConcurrency } from "../utils/concurrency.js";
 import { checkQuota, debitQuotaTopup, denyOverLimit, estimateCheckProductUnits } from "../services/billing.js";
+import {
+  awaitJob,
+  generateJobId,
+  getJob,
+  startJob,
+  JOB_AWAIT_MS,
+  type JobState,
+} from "../services/checkJobs.js";
 
 const log = createLogger("checkProduct");
 const COLLECTION_PATH_PATTERNS = [
@@ -68,7 +76,7 @@ const bodySchema = z.object({
     .optional(),
 });
 
-interface ApiResult {
+export interface ApiResult {
   result: CheckResult;
   fileBaseUrl?: string;
   dataUrl?: string;
@@ -404,80 +412,150 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
     const quota = await checkQuota(request.auth?.userId, billableUnits);
     if (!quota.allowed) return denyOverLimit(reply, quota.overview, billableUnits);
 
-    const progress = createProgressReporter(parsed.data.runId);
+    // The job id doubles as the progress channel and the poll key. Honor a
+    // client-supplied runId; otherwise mint one so the 202 caller can poll.
+    const jobId = parsed.data.runId ?? generateJobId();
+    const progress = createProgressReporter(jobId);
     // Proxy precedence: request `proxy` > account proxy > server env proxy.
     const userProxy = request.auth?.proxyUrl ?? null;
     const proxyOverride = parsed.data.proxy ?? userProxy ?? null;
     const usedProxy = proxySource(parsed.data.proxy, userProxy);
+    const ownerUserId = request.auth?.userId ?? null;
+    const responseMode = parsed.data.responseMode;
     const startedAt = Date.now();
-    try {
-      progress({ phase: "queued", message: "Check request accepted.", url: parsed.data.url });
-      const { result, fileBaseUrl, dataUrl } = await runWithProxy(proxyOverride, () =>
-        runCheck(parsed.data.url, progress),
-      );
-      const publicFileBaseUrl = toPublicUrl(request, fileBaseUrl!);
-      const publicDataUrl = toPublicUrl(request, dataUrl!);
-      await logUsage(request, {
-        endpoint: "/api/check-product",
-        status: 200,
-        ok: true,
-        durationMs: Date.now() - startedAt,
-        usedProxy,
-        units: billableUnits,
-        billable: true,
+
+    // Start (or attach to) the detached run. Billing + progress teardown happen
+    // exactly once, in onSettle, regardless of which HTTP call observes the end.
+    const record = startJob({
+      jobId,
+      ownerUserId,
+      responseMode,
+      run: () => {
+        progress({ phase: "queued", message: "Check request accepted.", url: parsed.data.url });
+        return runWithProxy(proxyOverride, () => runCheck(parsed.data.url, progress));
+      },
+      onSettle: async (state) => {
+        const durationMs = Date.now() - startedAt;
+        if (state.status === "done") {
+          await logUsage(request, {
+            endpoint: "/api/check-product",
+            status: 200,
+            ok: true,
+            durationMs,
+            usedProxy,
+            units: billableUnits,
+            billable: true,
+          });
+          await debitQuotaTopup(ownerUserId, quota.topupUnitsToDebit, "/api/check-product");
+        } else if (state.status === "error") {
+          const { status } = mapCheckError(state.error);
+          progress({ phase: "failed", message: errorMessage(state.error) });
+          await logUsage(request, {
+            endpoint: "/api/check-product",
+            status,
+            ok: false,
+            durationMs,
+            usedProxy,
+            units: billableUnits,
+            billable: false,
+          });
+        }
+        finishProgress(jobId);
+      },
+    });
+
+    // Block up to JOB_AWAIT_MS (under Railway's 300s edge cap). If the job lands
+    // in time, reply with the same shape as before. Otherwise return 202 so the
+    // client polls GET /api/check-product/:runId for the finished result.
+    const { done } = await awaitJob(record, JOB_AWAIT_MS);
+    if (!done) {
+      return reply.status(202).send({
+        success: true,
+        status: "pending",
+        runId: jobId,
+        retryAfter: 5,
       });
-      await debitQuotaTopup(request.auth?.userId, quota.topupUnitsToDebit, "/api/check-product");
-      if (parsed.data.responseMode === "url") {
-        return reply.send({
-          success: true,
-          kind: result.kind,
-          fileBaseUrl: publicFileBaseUrl,
-          dataUrl: publicDataUrl,
-          ...(result.kind === "collection" ? { summary: result.summary } : {}),
-        });
-      }
-      return reply.send({ success: true, result, fileBaseUrl: publicFileBaseUrl, dataUrl: publicDataUrl });
-    } catch (err) {
-      if (err instanceof CheckError) {
-        const status = err.code === "DOMAIN_NOT_ALLOWED" || err.code === "INVALID_URL" ? 400 : 502;
-        log.warn("check failed", { code: err.code, message: err.message });
-        progress({ phase: "failed", message: err.message });
-        await logUsage(request, {
-          endpoint: "/api/check-product",
-          status,
-          ok: false,
-          durationMs: Date.now() - startedAt,
-          usedProxy,
-          units: billableUnits,
-          billable: false,
-        });
-        return reply.status(status).send({
-          success: false,
-          error: { code: err.code, message: err.message },
-        });
-      }
-      log.error("unexpected error", { message: (err as Error).message });
-      progress({ phase: "failed", message: (err as Error).message || "An unexpected error occurred." });
-      await logUsage(request, {
-        endpoint: "/api/check-product",
-        status: 500,
-        ok: false,
-        durationMs: Date.now() - startedAt,
-        usedProxy,
-        units: billableUnits,
-        billable: false,
+    }
+    return sendJobState(request, reply, record.state, responseMode);
+  });
+
+  // Poll endpoint for runs that exceeded the synchronous window. Returns the
+  // exact same success/error body as the POST once the job is finished.
+  app.get("/api/check-product/:runId", { preHandler: requireApiKeyAuth }, async (request, reply) => {
+    const params = z.object({ runId: z.string().min(1) }).safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: "INVALID_URL" satisfies ErrorCode, message: "Invalid runId." },
       });
-      return reply.status(500).send({
+    }
+    const record = getJob(params.data.runId);
+    const ownerUserId = request.auth?.userId ?? null;
+    // 404 (not 403) on owner mismatch so we don't confirm a stranger's job id.
+    if (!record || (record.ownerUserId !== null && record.ownerUserId !== ownerUserId)) {
+      return reply.status(404).send({
         success: false,
         error: {
-          code: "UNKNOWN_ERROR" satisfies ErrorCode,
-          message: (err as Error).message || "An unexpected error occurred.",
+          code: "JOB_NOT_FOUND" satisfies ErrorCode,
+          message: "No check job found for this runId. It may have expired.",
         },
       });
-    } finally {
-      finishProgress(parsed.data.runId);
     }
+    if (record.state.status === "running") {
+      return reply.status(202).send({
+        success: true,
+        status: "pending",
+        runId: params.data.runId,
+        retryAfter: 5,
+      });
+    }
+    return sendJobState(request, reply, record.state, record.responseMode);
   });
+}
+
+/** Maps a settled-error into the same HTTP status the sync route used to return. */
+function mapCheckError(err: unknown): { status: number; code: ErrorCode; message: string } {
+  if (err instanceof CheckError) {
+    const status = err.code === "DOMAIN_NOT_ALLOWED" || err.code === "INVALID_URL" ? 400 : 502;
+    return { status, code: err.code, message: err.message };
+  }
+  return { status: 500, code: "UNKNOWN_ERROR", message: errorMessage(err) };
+}
+
+function errorMessage(err: unknown): string {
+  return (err as Error)?.message || "An unexpected error occurred.";
+}
+
+/** Serializes a finished job into the legacy success/error response shape. */
+function sendJobState(
+  request: { protocol: string; headers: { host?: string | undefined } },
+  reply: import("fastify").FastifyReply,
+  state: JobState,
+  responseMode: "full" | "url" | undefined,
+) {
+  if (state.status === "error") {
+    const { status, code, message } = mapCheckError(state.error);
+    if (status >= 500) log.error("check failed", { code, message });
+    else log.warn("check failed", { code, message });
+    return reply.status(status).send({ success: false, error: { code, message } });
+  }
+  if (state.status !== "done") {
+    // Defensive: callers only pass finished states, but keep the contract sane.
+    return reply.status(202).send({ success: true, status: "pending", retryAfter: 5 });
+  }
+  const { result, fileBaseUrl, dataUrl } = state.result;
+  const publicFileBaseUrl = toPublicUrl(request, fileBaseUrl!);
+  const publicDataUrl = toPublicUrl(request, dataUrl!);
+  if (responseMode === "url") {
+    return reply.send({
+      success: true,
+      kind: result.kind,
+      fileBaseUrl: publicFileBaseUrl,
+      dataUrl: publicDataUrl,
+      ...(result.kind === "collection" ? { summary: result.summary } : {}),
+    });
+  }
+  return reply.send({ success: true, result, fileBaseUrl: publicFileBaseUrl, dataUrl: publicDataUrl });
 }
 
 function toPublicUrl(

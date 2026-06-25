@@ -229,6 +229,7 @@ export type ErrorCode =
   | "NO_PRODUCT_DATA_FOUND"
   | "IMAGE_DOWNLOAD_FAILED"
   | "OUTPUT_WRITE_FAILED"
+  | "JOB_NOT_FOUND"
   | "UNKNOWN_ERROR";
 
 /** Thrown internally; carries a stable error code for the API layer. */
