@@ -57,6 +57,25 @@ describe("fetchPageDirect", () => {
     }));
     await expect(fetchPageDirect("https://shop.example/products/x")).rejects.toBeInstanceOf(CheckError);
   });
+
+  it("retries direct when the proxied fetch is blocked", async () => {
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = input.toString();
+      if (fetchMock.mock.calls.length === 1) {
+        const r = htmlResponse("<html><head><title>Just a moment...</title></head></html>", 403, "cloudflare");
+        Object.defineProperty(r, "url", { value: url });
+        return r;
+      }
+      const r = htmlResponse("<html><head><title>Recovered</title></head><body>ok</body></html>");
+      Object.defineProperty(r, "url", { value: url });
+      return r;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const page = await fetchPageDirect("https://shop.example/products/x");
+    expect(page.title).toBe("Recovered");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("loadPageOrFetch", () => {

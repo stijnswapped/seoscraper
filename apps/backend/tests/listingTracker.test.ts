@@ -326,6 +326,37 @@ describe("extractListingItems, plain-fetch HTML tier (auto)", () => {
     expect(result.items[0]?.imageUrl).toBe("https://cdn.shop.example/p1_800x.jpg");
   });
 
+  it("finds a sibling image from a Shopify grid-product wrapper", async () => {
+    const html = `<html><body>
+      <div data-section-type="collection-grid">
+        <div class="grid__item grid-product" data-product-handle="p1">
+          <div class="grid-product__content">
+            <div class="grid__item-image-wrapper">
+              <img src="//cdn.shop.example/p1-main.jpg" alt="Grid Product Alt">
+            </div>
+            <a class="grid-product__link" href="/collections/all/products/p1">
+              <div class="grid-product__meta">
+                <div class="grid-product__title">Grid Product Title</div>
+              </div>
+            </a>
+          </div>
+        </div>
+      </div>
+    </body></html>`;
+    fetchHtmlPage1(html);
+
+    const result = await extractListingItems(
+      new URL("https://shop.example/collections/all?sort_by=best-selling"),
+      "html",
+      100,
+      1,
+    );
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.handle).toBe("p1");
+    expect(result.items[0]?.title).toBe("Grid Product Title");
+    expect(result.items[0]?.imageUrl).toBe("https://cdn.shop.example/p1-main.jpg");
+  });
+
   it("canonicalizes collection-scoped grid links to /products/<handle>", async () => {
     // Some themes (handsomedans, arlento, …) render product links scoped under
     // the collection: /collections/all/products/<handle>. The canonical product

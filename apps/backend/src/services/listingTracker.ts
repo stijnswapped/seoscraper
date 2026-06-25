@@ -1013,6 +1013,10 @@ function findProductCard($: CheerioAPI, el: Element): Cheerio<Element> {
   const link = $(el) as Cheerio<Element>;
   const card = link.closest(
     [
+      "[data-product-handle]",
+      "[data-product-id]",
+      ".grid-product",
+      ".grid-product__content",
       "li",
       "article",
       '[class*="product-card" i]',

@@ -38,6 +38,19 @@ describe("product title vs page title", () => {
     const meta = extractMetadata(html, URL);
     expect(extractProduct(meta).title.value).toBe("LD Name");
   });
+
+  it("falls back to JSON-LD ProductGroup.name when Product is absent", () => {
+    const html = `<html><head>
+      <title>SEO - Brand</title>
+      <script type="application/ld+json">{"@type":"ProductGroup","name":"Group Name","description":"Group Desc"}</script>
+    </head><body></body></html>`;
+    const meta = extractMetadata(html, URL);
+    const product = extractProduct(meta);
+    expect(product.title.value).toBe("Group Name");
+    expect(product.title.source).toBe("jsonld:Product.name");
+    expect(product.description.value).toBe("Group Desc");
+    expect(product.structuredData).toHaveLength(1);
+  });
 });
 
 describe("image discovery placeholder filtering", () => {

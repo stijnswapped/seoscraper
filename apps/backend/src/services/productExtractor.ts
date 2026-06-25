@@ -36,7 +36,11 @@ function clean(value: string | undefined | null): string | null {
 
 export function extractProduct(meta: ExtractedMetadata): ExtractedProduct {
   const { $, jsonLd, seo } = meta;
-  const product = findJsonLdByType(jsonLd, "Product");
+  // Shopify themes frequently emit ProductGroup instead of Product on variant
+  // pages; treat it as product-like input for title/description extraction.
+  const product =
+    findJsonLdByType(jsonLd, "Product") ??
+    findJsonLdByType(jsonLd, "ProductGroup");
 
   const structuredData = collectStructuredData(jsonLd);
   const title = pickProductTitle($, product, seo);
@@ -49,7 +53,7 @@ export function extractProduct(meta: ExtractedMetadata): ExtractedProduct {
 }
 
 function collectStructuredData(nodes: unknown[]): unknown[] {
-  const wanted = new Set(["product", "offer", "imageobject", "breadcrumblist"]);
+  const wanted = new Set(["product", "productgroup", "offer", "imageobject", "breadcrumblist"]);
   return nodes.filter((node) => {
     if (!node || typeof node !== "object") return false;
     const t = (node as Record<string, unknown>)["@type"];

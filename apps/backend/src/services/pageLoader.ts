@@ -11,6 +11,7 @@ import {
   isBlockedResponse,
   isProxyHealthy,
   markProxyUnhealthy,
+  fetchDirect,
   proxyFetch,
 } from "./antiBlock.js";
 
@@ -324,7 +325,7 @@ export async function fetchPageDirect(url: string): Promise<LoadedPage> {
   let lastDetail = "";
   for (const [label, attempt] of [
     ["proxy", () => proxyFetch(url, { headers, redirect: "follow" })],
-    ["direct", () => fetch(url, { headers, redirect: "follow" })],
+    ["direct", () => fetchDirect(url, { headers, redirect: "follow" })],
   ] as const) {
     try {
       const res = await attempt();
