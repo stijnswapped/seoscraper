@@ -265,7 +265,16 @@ export async function withBrowserSession<T>(
 
     return await fn(session);
   } finally {
-    if (browserInstance) await browserInstance.close().catch(() => {});
+    // Cap close() so a hung/OOM'd chrome-headless-shell can't stall here. With
+    // maxConcurrency=1 a stuck close would never release the sole browser permit,
+    // wedging every later check in permanent "pending". Release is guaranteed
+    // within the timeout regardless of what close() does.
+    if (browserInstance) {
+      await Promise.race([
+        browserInstance.close().catch(() => {}),
+        new Promise((resolve) => setTimeout(resolve, 5_000)),
+      ]);
+    }
     browserSlots.release();
   }
 }
