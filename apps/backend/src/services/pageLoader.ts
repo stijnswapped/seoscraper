@@ -3,7 +3,7 @@ import { sitesConfig } from "../../../../config/sites.config.js";
 import { CheckError } from "../types/productCheck.js";
 import { createLogger } from "../utils/logger.js";
 import { stripLocalePrefix } from "../utils/url.js";
-import { Semaphore } from "../utils/semaphore.js";
+import { Semaphore, SemaphoreAcquireTimeoutError } from "../utils/semaphore.js";
 import {
   STEALTH_INIT_SCRIPT,
   buildRealisticHeaders,
@@ -142,8 +142,35 @@ export async function withBrowserSession<T>(
   let browserInstance: Browser | null = null;
 
   // Hold a global slot for the entire session so we never exceed the configured
-  // number of live Chromium processes, no matter how many requests arrive.
-  await browserSlots.acquire();
+  // number of live Chromium processes, no matter how many requests arrive. Time-
+  // box the wait: if the pool is wedged, fail fast with a clear error instead of
+  // parking this check in permanent "pending" behind the stuck holder.
+  try {
+    await browserSlots.acquire(browser.acquireTimeoutMs);
+  } catch (err) {
+    if (err instanceof SemaphoreAcquireTimeoutError) {
+      throw new CheckError(
+        "PAGE_LOAD_FAILED",
+        `Browser pool saturated: no free slot after ${Math.round(browser.acquireTimeoutMs / 1000)}s.`,
+      );
+    }
+    throw err;
+  }
+
+  // Safety net: if a session ever wedges (hung Chromium, a page that never
+  // settles), force-close the browser at the deadline. That aborts in-flight
+  // page work AND lets the finally below release the sole permit, so a single
+  // bad store can't park every later check in permanent "pending".
+  let timedOut = false;
+  const killTimer = setTimeout(() => {
+    timedOut = true;
+    log.error("session exceeded deadline; force-closing browser to release the slot", {
+      deadlineMs: browser.sessionDeadlineMs,
+    });
+    browserInstance?.close().catch(() => {});
+  }, browser.sessionDeadlineMs);
+  killTimer.unref?.();
+
   try {
     browserInstance = await launchBrowserWithRetry();
     const context = await browserInstance.newContext({
@@ -263,8 +290,21 @@ export async function withBrowserSession<T>(
       },
     };
 
-    return await fn(session);
+    try {
+      return await fn(session);
+    } catch (err) {
+      // A force-close at the deadline surfaces as an opaque "Target closed"
+      // error; translate it so callers see a clear, actionable reason.
+      if (timedOut) {
+        throw new CheckError(
+          "PAGE_LOAD_FAILED",
+          `Session exceeded the ${Math.round(browser.sessionDeadlineMs / 1000)}s deadline and was aborted.`,
+        );
+      }
+      throw err;
+    }
   } finally {
+    clearTimeout(killTimer);
     // Cap close() so a hung/OOM'd chrome-headless-shell can't stall here. With
     // maxConcurrency=1 a stuck close would never release the sole browser permit,
     // wedging every later check in permanent "pending". Release is guaranteed

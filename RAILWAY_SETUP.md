@@ -131,6 +131,47 @@ Short scroll budget for product pages.
 
 Long scroll budget for collection/listing pages.
 
+### Reliability / anti-wedge (recommended)
+
+These bound how long the shared headless browser can be held so a single slow or
+blocked store can never park every later check in permanent `pending`:
+
+Variable
+
+Recommended value
+
+Notes
+
+`BROWSER_MAX_CONCURRENCY`
+
+`1` (small box) / `2` (2+ GB RAM)
+
+Live Chromium processes across all checks. `1` serializes everything — raise it if the box has RAM so one slow store doesn't block the queue.
+
+`BROWSER_SESSION_DEADLINE_MS`
+
+`180000`
+
+Hard cap on one browser session. On timeout the browser is force-closed and the concurrency slot is released.
+
+`BROWSER_ACQUIRE_TIMEOUT_MS`
+
+`120000`
+
+Max wait for a free browser slot before a check fails fast (instead of hanging) when the pool is saturated.
+
+`SCRAPE_PROXY_URL`
+
+`http://user:pass@host:port`
+
+Residential/rotating proxy — the only reliable defense against Cloudflare IP blocking (needed for stores that never scrape successfully).
+
+`PROXY_ROTATING`
+
+`true`
+
+Set when `SCRAPE_PROXY_URL` is a rotating pool (fresh exit IP per request); enables retry-on-block instead of a cooldown.
+
 You do **not** need to set `PORT` or `HOST`:
 
 -   `PORT` is injected by Railway.
@@ -198,6 +239,14 @@ Send `Authorization: Bearer <API_KEY>` (or `x-api-key`). The dashboard does this
 Page renders fail / timeouts
 
 Increase memory; some sites are slow. Browser timeout is 30s by default.
+
+Checks stuck on `pending`, never resolve
+
+The shared browser wedged/overloaded. **Restart/redeploy the service** to clear it. To prevent recurrence, set `BROWSER_SESSION_DEADLINE_MS` + `BROWSER_ACQUIRE_TIMEOUT_MS` (above) and consider `BROWSER_MAX_CONCURRENCY=2` on a 2+ GB box.
+
+A specific store never scrapes (others work)
+
+Cloudflare/anti-bot is blocking the scraper's IP. Configure `SCRAPE_PROXY_URL` (residential/rotating) + `PROXY_ROTATING=true`. Without a working proxy those stores keep failing.
 
 SSL/connection errors to Postgres
 
