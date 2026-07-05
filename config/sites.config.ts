@@ -70,6 +70,21 @@ export interface SitesConfig {
     /** Per-attempt timeout for chromium.launch() before we retry it. */
     launchTimeoutMs: number;
     /**
+     * Hard wall-clock cap on a single browser session. When exceeded the browser
+     * is force-closed, which aborts any in-flight page work and — crucially —
+     * releases the shared concurrency permit. Without this a session that wedges
+     * (a hung Chromium, a store that never settles) holds the sole permit and
+     * parks every later check in permanent "pending".
+     */
+    sessionDeadlineMs: number;
+    /**
+     * How long a check waits for a free browser permit before giving up with a
+     * clear error instead of queueing forever behind a wedged holder. Keep it
+     * under the caller's poll/await window so a saturated pool fails fast and the
+     * client retries, rather than the job hanging as "pending".
+     */
+    acquireTimeoutMs: number;
+    /**
      * Abort image/media/font requests in the headless browser. SEO/rank
      * extraction reads the DOM (links, <title>, JSON-LD, <img> attributes), so
      * the rendered pixels are never needed — blocking them cuts proxy bytes
@@ -198,6 +213,8 @@ export const sitesConfig: SitesConfig = {
     viewport: { width: 1366, height: 1000 },
     maxConcurrency: envInt("BROWSER_MAX_CONCURRENCY", 1),
     launchTimeoutMs: envInt("BROWSER_LAUNCH_TIMEOUT_MS", 45000),
+    sessionDeadlineMs: envInt("BROWSER_SESSION_DEADLINE_MS", 180000),
+    acquireTimeoutMs: envInt("BROWSER_ACQUIRE_TIMEOUT_MS", 120000),
     blockAssets: envBool("BLOCK_BROWSER_ASSETS", true),
     blockStylesheets: envBool("BLOCK_BROWSER_STYLESHEETS", false),
   },

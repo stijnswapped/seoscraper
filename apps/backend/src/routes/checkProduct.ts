@@ -55,6 +55,41 @@ import {
 } from "../services/checkJobs.js";
 
 const log = createLogger("checkProduct");
+
+/**
+ * Hard wall-clock ceiling on a single check job. Kept just under
+ * {@link JOB_AWAIT_MS} so a doomed run settles as an error *within* the
+ * initiating POST's await window — the caller gets a real failure (and retries)
+ * instead of polling a job that is stuck "pending" forever. The per-session
+ * browser deadline (see pageLoader) normally fires first and frees the slot;
+ * this is the outer backstop for anything that hangs outside the browser.
+ */
+const JOB_HARD_DEADLINE_MS = Math.max(30_000, JOB_AWAIT_MS - 10_000);
+
+/**
+ * Reject `work` with a {@link CheckError} if it hasn't settled within
+ * {@link JOB_HARD_DEADLINE_MS}. The underlying work is not cancellable here, but
+ * every step it awaits is independently time-boxed, so it drains on its own; this
+ * only guarantees the *job record* settles promptly so polling can stop.
+ */
+function withJobDeadline<T>(url: string, work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new CheckError(
+            "PAGE_LOAD_FAILED",
+            `Check exceeded the ${Math.round(JOB_HARD_DEADLINE_MS / 1000)}s deadline for ${url}.`,
+          ),
+        ),
+      JOB_HARD_DEADLINE_MS,
+    );
+    timer.unref?.();
+  });
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
 const COLLECTION_PATH_PATTERNS = [
   /\/collections(?:\/|$)/i,
   /\/category(?:\/|$)/i,
@@ -432,7 +467,10 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
       responseMode,
       run: () => {
         progress({ phase: "queued", message: "Check request accepted.", url: parsed.data.url });
-        return runWithProxy(proxyOverride, () => runCheck(parsed.data.url, progress));
+        return withJobDeadline(
+          parsed.data.url,
+          runWithProxy(proxyOverride, () => runCheck(parsed.data.url, progress)),
+        );
       },
       onSettle: async (state) => {
         const durationMs = Date.now() - startedAt;
