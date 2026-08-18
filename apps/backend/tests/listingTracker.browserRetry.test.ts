@@ -88,3 +88,31 @@ describe("extractListingItems, auto browser retry on rotating proxy", () => {
     expect(result.items[0]?.handle).not.toBe("default-first");
   });
 });
+
+describe("extractListingItems, skips the browser when the STORE returned 5xx", () => {
+  it("does not launch a browser for a collection the shop itself cannot render (drune.de)", async () => {
+    // The shop answers 500 for the collection page but serves /products.json.
+    mocks.proxyFetch.mockImplementation(async (input: string | URL) => {
+      const url = input.toString();
+      if (url.includes("/products.json")) {
+        return jsonResponse({ products: [{ id: 1, handle: "sweatshirt", title: "Sweatshirt" }] }, url);
+      }
+      const res = new Response("<title>Something went wrong</title>", { status: 500 });
+      Object.defineProperty(res, "url", { value: url });
+      return res;
+    });
+
+    const result = await extractListingItems(
+      new URL("https://drune.de/collections/all?sort_by=best-selling"),
+      "auto",
+      50,
+      1,
+    );
+
+    // The browser tier is pointless here: it would get the same 500, six times.
+    expect(mocks.withBrowserSession).not.toHaveBeenCalled();
+    expect(result.sourceUsed).toBe("shopify_json");
+    expect(result.items.map((i) => i.handle)).toEqual(["sweatshirt"]);
+    expect(result.warnings.some((w) => w.includes("failing to render on the shop's server"))).toBe(true);
+  });
+});

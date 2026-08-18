@@ -13,6 +13,12 @@ export interface SeoEnrichmentResult {
   enriched: number;
   /** Number of products whose page fetch failed (keep their grid title). */
   failed: number;
+  /**
+   * Distinct extraction warnings seen across the products, e.g. "the <title> is
+   * only the store name". These describe the STORE's SEO, which is exactly what
+   * this tool exists to report, so they are surfaced instead of swallowed.
+   */
+  warnings: string[];
 }
 
 /**
@@ -38,8 +44,11 @@ export async function enrichListingItemsWithSeo(
   const concurrency = sitesConfig.enrichment.concurrency;
   let enriched = 0;
   let failed = 0;
+  // Deduplicated: a store-wide title bug repeats on every product page, and one
+  // warning describes it better than 150 identical copies.
+  const seoWarnings = new Set<string>();
 
-  if (items.length === 0) return { enriched, failed };
+  if (items.length === 0) return { enriched, failed, warnings: [] };
 
   progress?.({
     phase: "seo-enrich-start",
@@ -50,7 +59,9 @@ export async function enrichListingItemsWithSeo(
   await runWithConcurrency(items, concurrency, async (item) => {
     try {
       const page = await fetchPageDirect(item.url);
-      const seoTitle = extractMetadata(page.html, page.finalUrl).seo.title.value;
+      const seoField = extractMetadata(page.html, page.finalUrl).seo.title;
+      const seoTitle = seoField.value;
+      for (const warning of seoField.warnings ?? []) seoWarnings.add(warning);
       // Only overwrite when the page yielded a real title; otherwise keep the
       // grid-derived fallback already on the item.
       if (seoTitle) item.titleSeo = seoTitle;
@@ -74,6 +85,6 @@ export async function enrichListingItemsWithSeo(
     }
   });
 
-  log.info("seo enrichment complete", { count: items.length, enriched, failed });
-  return { enriched, failed };
+  log.info("seo enrichment complete", { count: items.length, enriched, failed, warnings: seoWarnings.size });
+  return { enriched, failed, warnings: [...seoWarnings] };
 }

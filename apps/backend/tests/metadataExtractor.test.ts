@@ -216,3 +216,54 @@ describe("extractMetadata & extractProduct Fallbacks", () => {
     expect(prod.structuredData).toHaveLength(2);
   });
 });
+
+describe("degenerate <title> (store name on every page)", () => {
+  const productUrl = "https://modapoznan.com/products/elowen";
+
+  it("prefers og:title when <title> is only the store name, and warns", () => {
+    // modapoznan.com: the theme prints the shop name in <title> on every page,
+    // and og:site_name spells it without the diacritic ("Poznan" vs "Poznań").
+    const html = `
+      <html>
+        <head>
+          <title>Moda Poznań</title>
+          <meta property="og:site_name" content="Moda Poznan" />
+          <meta property="og:title" content="Elowen | Damskie Ortopedyczne Kapcie" />
+        </head>
+      </html>
+    `;
+    const meta = extractMetadata(html, productUrl);
+    expect(meta.seo.title.value).toBe("Elowen | Damskie Ortopedyczne Kapcie");
+    expect(meta.seo.title.source).toBe("og:title");
+    expect(meta.seo.title.warnings?.join(" ")).toContain("only the store name");
+  });
+
+  it("keeps a real <title> that merely ends with the store name", () => {
+    const html = `
+      <html>
+        <head>
+          <title>Elowen Kapcie – Moda Poznan</title>
+          <meta property="og:site_name" content="Moda Poznan" />
+          <meta property="og:title" content="Elowen | Damskie Ortopedyczne Kapcie" />
+        </head>
+      </html>
+    `;
+    const meta = extractMetadata(html, productUrl);
+    expect(meta.seo.title.value).toBe("Elowen Kapcie – Moda Poznan");
+    expect(meta.seo.title.source).toBe("title_tag");
+  });
+
+  it("keeps the store name (with a warning) when there is nothing better", () => {
+    const html = `
+      <html>
+        <head>
+          <title>Moda Poznan</title>
+          <meta property="og:site_name" content="Moda Poznan" />
+        </head>
+      </html>
+    `;
+    const meta = extractMetadata(html, productUrl);
+    expect(meta.seo.title.value).toBe("Moda Poznan");
+    expect(meta.seo.title.warnings?.join(" ")).toContain("only the store name");
+  });
+});

@@ -209,6 +209,17 @@ export function buildRealisticHeaders(referer?: string): Record<string, string> 
     "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-platform": '"macOS"',
+    // High-entropy client hints. Shopify/Cloudflare advertise these in
+    // `critical-ch` on their challenge responses; a "Chrome" that never sends
+    // them after being asked is a bot tell, so we send them up front.
+    "sec-ch-ua-arch": '"arm"',
+    "sec-ch-ua-bitness": '"64"',
+    "sec-ch-ua-full-version": '"124.0.6367.207"',
+    "sec-ch-ua-full-version-list":
+      '"Chromium";v="124.0.6367.207", "Google Chrome";v="124.0.6367.207", "Not-A.Brand";v="99.0.0.0"',
+    "sec-ch-ua-model": '""',
+    "sec-ch-ua-platform-version": '"14.5.0"',
+    priority: "u=0, i",
     "sec-fetch-dest": "document",
     "sec-fetch-mode": "navigate",
     "sec-fetch-site": referer ? "same-origin" : "none",
@@ -265,8 +276,20 @@ export const STEALTH_INIT_SCRIPT = `
  * challenge rather than the real page? Used to escalate or degrade instead of
  * parsing a challenge page as if it were the product grid.
  */
-export function isBlockedResponse(status: number, html: string, server?: string | null): boolean {
-  if (status === 403 || status === 429 || status === 503 || (status >= 520 && status <= 530)) return true;
+export function isBlockedResponse(
+  status: number,
+  html: string,
+  server?: string | null,
+  /**
+   * The response's `cf-mitigated` header. Cloudflare/Shopify set it to
+   * "challenge" on EVERY interstitial they serve, whatever status code rides
+   * along (drune.de answers 429, other shops 403 or even 200), so it is the
+   * single most reliable block signal — check it before any body heuristic.
+   */
+  cfMitigated?: string | null,
+): boolean {
+  if (cfMitigated && cfMitigated.trim() !== "") return true;
+  if (status === 403 || status === 429 || status === 430 || status === 503 || (status >= 520 && status <= 530)) return true;
   const head = html.slice(0, 4000).toLowerCase();
   return (
     head.includes("just a moment") ||
@@ -274,6 +297,12 @@ export function isBlockedResponse(status: number, html: string, server?: string 
     head.includes("cf-challenge") ||
     head.includes("/cdn-cgi/challenge-platform") ||
     head.includes("attention required") ||
+    // Shopify's own bot interstitial ("Verifying your connection...") — a
+    // different template from Cloudflare's, so it needs its own markers.
+    head.includes("verifying your connection") ||
+    head.includes("connection needs to be verified") ||
+    head.includes("enable javascript and cookies to continue") ||
+    head.includes("verifying you are human") ||
     (head.includes("cloudflare") && head.includes("captcha")) ||
     (server?.toLowerCase() === "cloudflare" && head.includes("ray id"))
   );
@@ -293,12 +322,28 @@ const PROXY_RETRY_COOLDOWN_MS =
   Number(process.env.PROXY_RETRY_COOLDOWN_MS) > 0 ? Number(process.env.PROXY_RETRY_COOLDOWN_MS) : 5 * 60_000;
 // Keyed by proxy identity so one customer's dead proxy doesn't disable everyone's.
 const proxyDisabledUntil = new Map<string, number>();
+/**
+ * Cooldown for proxies that are BROKEN rather than merely blocked: the CONNECT
+ * tunnel is refused, the credentials are rejected (HTTP 407, or a provider code
+ * like Decodo/Smartproxy's 612 "auth fail"), or the gateway is unreachable. This
+ * applies to rotating pools as well — no exit IP can fix bad credentials.
+ */
+const proxyBrokenUntil = new Map<string, number>();
+/** Last broken-proxy reason per proxy identity, surfaced in scrape warnings. */
+const proxyBrokenReason = new Map<string, string>();
 
 /** Whether the active proxy should be attempted (false during its cooldown). */
 export function isProxyHealthy(): boolean {
   const ctx = currentProxy();
   if (!ctx.config) return false;
-  // A rotating gateway is always "healthy" — we never disable it on a bad exit.
+  // A BROKEN proxy (bad credentials, unreachable gateway) is unusable no matter
+  // how many exit IPs it claims to have, so its cooldown applies to rotating
+  // pools too. Without this, a rotating gateway with expired credentials stayed
+  // "healthy" forever and was attached to every Chromium launch — permanently
+  // killing the browser tier while the fetch tier silently ran direct.
+  if (Date.now() < (proxyBrokenUntil.get(ctx.key) ?? 0)) return false;
+  // A rotating gateway is never disabled for a *blocked exit* — the next request
+  // gets a fresh IP, so retrying through it is the correct move.
   if (ctx.rotating) return true;
   return Date.now() >= (proxyDisabledUntil.get(ctx.key) ?? 0);
 }
@@ -331,6 +376,48 @@ export function markProxyUnhealthy(context: string, detail?: string): void {
       proxy: redactProxy(ctx.key),
     });
   }
+}
+
+/**
+ * Record that the active proxy is BROKEN (refused tunnel / rejected credentials /
+ * unreachable gateway) and stop using it — for rotating pools too — until the
+ * cooldown expires. Unlike {@link markProxyUnhealthy} this is not about a single
+ * blocked exit IP, so retrying through the same gateway cannot help.
+ */
+export function markProxyBroken(context: string, detail?: string): void {
+  const ctx = currentProxy();
+  if (!ctx.config) return;
+  const wasBroken = Date.now() < (proxyBrokenUntil.get(ctx.key) ?? 0);
+  proxyBrokenUntil.set(ctx.key, Date.now() + PROXY_RETRY_COOLDOWN_MS);
+  proxyBrokenReason.set(ctx.key, detail ? `${context}: ${detail}` : context);
+  // Also trip the ordinary cooldown so the static path agrees with the browser.
+  proxyDisabledUntil.set(ctx.key, Date.now() + PROXY_RETRY_COOLDOWN_MS);
+  if (!wasBroken) {
+    log.error(
+      `proxy is BROKEN (not just blocked); scraping DIRECT from this server's own IP for ` +
+        `${Math.round(PROXY_RETRY_COOLDOWN_MS / 1000)}s. Bot-block rates rise sharply without it.`,
+      { context, detail, proxy: redactProxy(ctx.key) },
+    );
+  }
+}
+
+/**
+ * Why the active proxy is currently bypassed, or null when it is fine (or when
+ * none is configured). Callers surface this in the API response so a dead proxy
+ * shows up as an explicit warning instead of silently degrading every scrape.
+ */
+export function proxyDegradationReason(): string | null {
+  const ctx = currentProxy();
+  if (!ctx.config) return null;
+  if (Date.now() >= (proxyBrokenUntil.get(ctx.key) ?? 0)) return null;
+  return proxyBrokenReason.get(ctx.key) ?? "the proxy failed";
+}
+
+/** Test seam: forget all proxy health state. */
+export function resetProxyHealth(): void {
+  proxyDisabledUntil.clear();
+  proxyBrokenUntil.clear();
+  proxyBrokenReason.clear();
 }
 
 // One undici ProxyAgent per distinct proxy URL (reused across requests).
@@ -401,8 +488,9 @@ export async function proxyFetch(input: string, init?: RequestInit): Promise<Res
     try {
       const res = await fetchWithTimeout(input, { ...init, dispatcher } as RequestInit, PROXY_FETCH_TIMEOUT_MS);
       if (res.status === 407) {
-        // Auth failure won't fix itself by retrying — bail to direct.
-        if (!rotating) markProxyUnhealthy("proxyFetch", "HTTP 407 proxy authentication required");
+        // Auth failure won't fix itself by retrying, and a fresh exit IP can't
+        // fix credentials either — so this disables rotating pools as well.
+        markProxyBroken("proxyFetch", "HTTP 407 proxy authentication required");
         return fetchWithTimeout(input, init, PROXY_FETCH_TIMEOUT_MS);
       }
       return res;
@@ -410,8 +498,10 @@ export async function proxyFetch(input: string, init?: RequestInit): Promise<Res
       lastErr = err;
     }
   }
-  // All proxy attempts failed.
-  if (!rotating) markProxyUnhealthy("proxyFetch", (lastErr as Error)?.message);
-  else log.warn("proxy attempts exhausted; falling back to DIRECT for this request", { message: (lastErr as Error)?.message });
+  // Every attempt threw before a response arrived: the gateway itself is
+  // unreachable or rejected the tunnel (a dead/expired proxy), which no amount
+  // of exit-IP rotation fixes. Mark it broken so the browser tier stops
+  // attaching it too, then serve this request direct.
+  markProxyBroken("proxyFetch", (lastErr as Error)?.message);
   return fetchWithTimeout(input, init, PROXY_FETCH_TIMEOUT_MS);
 }

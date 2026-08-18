@@ -126,6 +126,35 @@ export function extractMetadata(html: string, finalUrl: string): ExtractedMetada
   };
 }
 
+/**
+ * Normalize a title for comparison: lowercase, strip diacritics, drop everything
+ * that isn't a letter or digit. So "Moda Poznań" and "Moda Poznan" — the same
+ * store name spelled with and without the diacritic in <title> vs og:site_name —
+ * compare equal.
+ */
+function normalizeForCompare(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+/**
+ * True when the page's <title> carries no page-specific information because it is
+ * *only* the store name. Some themes/SEO apps render a hardcoded shop name in the
+ * title block, so every product page ships the identical <title> (observed on
+ * modapoznan.com: all ~1,500 products report "Moda Poznań"). Taking that at face
+ * value reports one meaningless SEO title for the whole catalog, so callers
+ * prefer og:title instead and flag the store-side bug.
+ */
+export function isStoreNameOnlyTitle(titleTag: string, siteName: string | null): boolean {
+  if (!siteName) return false;
+  const title = normalizeForCompare(titleTag);
+  return title.length > 0 && title === normalizeForCompare(siteName);
+}
+
 function pickTitle(
   $: CheerioAPI,
   og: Record<string, string>,
@@ -133,7 +162,25 @@ function pickTitle(
   product: Record<string, unknown> | null,
 ): ExtractedField<string | null> {
   const titleTag = clean($("title").first().text());
-  if (titleTag) return field(titleTag, "title_tag", CONFIDENCE.titleTag);
+  const siteName = clean(og["og:site_name"]);
+  const degenerateTitle = !!titleTag && isStoreNameOnlyTitle(titleTag, siteName);
+  if (titleTag && !degenerateTitle) return field(titleTag, "title_tag", CONFIDENCE.titleTag);
+
+  if (degenerateTitle) {
+    const warning =
+      `The page <title> is only the store name ("${titleTag}"), identical on every page — ` +
+      "a store-side SEO bug. Used the page-specific title instead.";
+    const replacement =
+      clean(og["og:title"]) ??
+      clean(tw["twitter:title"]) ??
+      clean(product?.["name"] as string | undefined) ??
+      clean($("h1").first().text());
+    if (replacement && normalizeForCompare(replacement) !== normalizeForCompare(titleTag as string)) {
+      return field(replacement, "og:title", CONFIDENCE.ogTag, [warning]);
+    }
+    // Nothing better to offer — keep the store name but still flag it.
+    return field(titleTag as string, "title_tag", CONFIDENCE.titleTag, [warning]);
+  }
 
   const ogTitle = clean(og["og:title"]);
   if (ogTitle) return field(ogTitle, "og:title", CONFIDENCE.ogTag);

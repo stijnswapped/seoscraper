@@ -43,7 +43,7 @@ describe("enrichListingItemsWithSeo", () => {
     const items = [item("alpha"), item("beta")];
     const result = await enrichListingItemsWithSeo(items);
 
-    expect(result).toEqual({ enriched: 2, failed: 0 });
+    expect(result).toEqual({ enriched: 2, failed: 0, warnings: [] });
     // titleSeo is now the authoritative page title; the product title is untouched.
     expect(items[0]?.titleSeo).toBe("SEO title for alpha");
     expect(items[0]?.title).toBe("alpha grid title");
@@ -70,9 +70,40 @@ describe("enrichListingItemsWithSeo", () => {
     const items = [item("alpha"), { ...item("beta"), titleSeo: "beta grid title" }];
     const result = await enrichListingItemsWithSeo(items);
 
-    expect(result).toEqual({ enriched: 1, failed: 1 });
+    expect(result).toEqual({ enriched: 1, failed: 1, warnings: [] });
     expect(items[0]?.titleSeo).toBe("SEO title for alpha");
     // beta's page failed → keep whatever grid title it already had.
     expect(items[1]?.titleSeo).toBe("beta grid title");
+  });
+});
+
+describe("enrichListingItemsWithSeo, reports store-side SEO title bugs", () => {
+  it("returns ONE warning when every product page's <title> is just the store name", async () => {
+    const page = (ogTitle: string) => `
+      <html><head>
+        <title>Moda Poznań</title>
+        <meta property="og:site_name" content="Moda Poznan" />
+        <meta property="og:title" content="${ogTitle}" />
+      </head></html>`;
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = input.toString();
+      const res = new Response(page(url.endsWith("alpha") ? "Alpha Dress" : "Beta Coat"), {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+      Object.defineProperty(res, "url", { value: url });
+      return res;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const items: ListingRankItem[] = [
+      { rank: 1, productKey: "handle:alpha", url: "https://modapoznan.com/products/alpha", handle: "alpha", source: "html" },
+      { rank: 2, productKey: "handle:beta", url: "https://modapoznan.com/products/beta", handle: "beta", source: "html" },
+    ];
+    const result = await enrichListingItemsWithSeo(items);
+
+    expect(items.map((i) => i.titleSeo)).toEqual(["Alpha Dress", "Beta Coat"]);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toContain("only the store name");
   });
 });

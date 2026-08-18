@@ -1245,6 +1245,49 @@ Run:
 npx playwright install chromium
 ```
 
+### A store keeps returning `NO_PRODUCT_DATA_FOUND`
+
+Diagnose in this order — the first two causes account for nearly all cases.
+
+**1. Check the proxy first.** A configured-but-dead proxy is silent: every tier
+falls back to this server's own datacenter IP, which Shopify challenges far more
+aggressively than a residential exit.
+
+```bash
+cd apps/backend && npx tsx scripts/checkProxy.ts
+```
+
+`!! PROXY NOT IN USE` means `SCRAPE_PROXY_URL` is broken (wrong/expired
+credentials, or the plan is out of traffic — Decodo/Smartproxy answers CONNECT
+with a non-standard `612 auth fail`). Fix that before investigating the store.
+Scrape responses also carry a `warnings` entry when the proxy was bypassed.
+
+**2. Run the per-store diagnostic.** It separates a bot block from a store-side
+failure, which need completely different fixes:
+
+```bash
+cd apps/backend && npx tsx scripts/debugSites.ts --enrich "https://shop.example/collections/all?sort_by=best-selling"
+```
+
+| Symptom in the output | Meaning | Fix |
+| --- | --- | --- |
+| `cf-mitigated: challenge` (any status) | bot protection | needs a healthy residential/rotating proxy |
+| `HTTP 500` + `<title>Something went wrong` | the SHOP cannot render that page | nothing scraper-side can fix it — the merchant must fix the theme/collection, or track a smaller collection |
+| `HTTP 429` | we are being rate-limited | lower `MAX_COLLECTION_PAGES` / concurrency, retry later |
+| `productLinks: 0` on an HTTP 200 | JS-rendered grid or IP cloaking | the browser tier handles it; check it is not disabled by a dead proxy |
+
+For Shopify's virtual `all` collection the tracker automatically falls back to
+the shop-wide `/products.json` when the collection feed errors, so the run still
+returns the catalog — with an explicit warning that best-selling order was lost.
+
+### Every product reports the same SEO title
+
+The store's theme prints a fixed `<title>` (usually just the shop name) on every
+page. The extractor detects this, falls back to the page-specific `og:title`,
+and adds a warning naming the offending title. The real fix is on the store:
+restore `{{ page_title }}` in `layout/theme.liquid`, or remove whatever SEO app
+overwrote it — until then Google sees one title for the whole catalog.
+
 ## Security Rules
 
 - Only scrape domains you own or are allowed to test.

@@ -11,7 +11,7 @@ import type {
 import { CheckError } from "../types/productCheck.js";
 import { assertDomainAllowed, safeCollectionRedirectTarget, validateAndNormalizeUrl } from "../utils/url.js";
 import { withBrowserSession } from "./pageLoader.js";
-import { buildRealisticHeaders, fetchDirect, isBlockedResponse, isProxyConfigured, isProxyRotating, proxyFetch } from "./antiBlock.js";
+import { buildRealisticHeaders, fetchDirect, isBlockedResponse, isProxyConfigured, isProxyRotating, proxyDegradationReason, proxyFetch } from "./antiBlock.js";
 import { crawlPages, resolveMaxPages } from "./pagination.js";
 import { enrichListingItemsWithSeo } from "./listingSeoEnrichment.js";
 import type { ProgressReporter } from "./progressHub.js";
@@ -37,6 +37,13 @@ interface TrackListingInput {
    * by default: it's one extra proxy request per product, so it's opt-in.
    */
   enrichSeo?: boolean;
+}
+
+/** What the plain-fetch HTML tier learned, so later tiers can skip pointless work. */
+interface HtmlTierOutcome {
+  /** The shop answered 5xx (not a bot challenge) — its own page is broken. */
+  storeError: boolean;
+  status?: number;
 }
 
 interface ExtractionResult {
@@ -68,8 +75,22 @@ export async function trackListing(input: TrackListingInput): Promise<ListingRan
 
   const listingKey = createListingKey(url);
   const extraction = await extractListingItems(url, strategy, maxProducts, maxPages, progress);
+  // A configured-but-unusable proxy is the single most common cause of "this
+  // store keeps erroring": every tier silently falls back to the server's own
+  // (datacenter) IP, which shops challenge far more aggressively. Surface it.
+  const proxyProblem = proxyDegradationReason();
+  if (proxyProblem) {
+    extraction.warnings.push(
+      `The configured proxy is not usable (${proxyProblem}), so this scrape ran from the server's own IP. ` +
+        "Bot-protection blocks are much more likely until the proxy is fixed.",
+    );
+  }
   if (extraction.items.length === 0) {
-    throw new CheckError("NO_PRODUCT_DATA_FOUND", "No product ranking items were found for this listing.");
+    // Attach the per-tier warnings. Without them the caller only ever saw
+    // "No product ranking items were found", which hides whether the store
+    // returned HTTP 500, served a bot challenge, or simply has no products.
+    const details = extraction.warnings.length > 0 ? ` ${extraction.warnings.join(" ")}` : "";
+    throw new CheckError("NO_PRODUCT_DATA_FOUND", `No product ranking items were found for this listing.${details}`);
   }
 
   // Replace each item's grid-derived `titleSeo` with the REAL product-page SEO
@@ -78,6 +99,7 @@ export async function trackListing(input: TrackListingInput): Promise<ListingRan
   if (input.enrichSeo) {
     const seo = await enrichListingItemsWithSeo(extraction.items, progress);
     extraction.rawMetadata = { ...extraction.rawMetadata, seoEnriched: seo.enriched, seoFailed: seo.failed };
+    extraction.warnings.push(...seo.warnings);
     if (seo.failed > 0) {
       extraction.warnings.push(`Could not read the SEO title for ${seo.failed} of ${extraction.items.length} products.`);
     }
@@ -158,7 +180,12 @@ export async function extractListingItems(
   const warnings: string[] = [];
   const hasSortBy = url.searchParams.has("sort_by");
 
-  const fetchHtml = () => extractFetchedHtmlListingItems(url, maxProducts, maxPages, progress, warnings);
+  // Filled in by the plain-fetch tier. When the STORE itself failed to render the
+  // page (HTTP 5xx that is not a bot mitigation), the headless browser will get
+  // the exact same 5xx — so escalating to it only burns ~10s per attempt and
+  // adds request volume that pushes the shop into rate-limiting us.
+  const htmlOutcome: HtmlTierOutcome = { storeError: false };
+  const fetchHtml = () => extractFetchedHtmlListingItems(url, maxProducts, maxPages, progress, warnings, htmlOutcome);
   const browserHtml = () => extractHtmlListingItems(url, maxProducts, maxPages, progress, warnings);
   // Ranking source: capped at maxProducts (order matters). Enrichment index:
   // full feed (bounded by maxPages) so every best-selling handle can be matched.
@@ -194,7 +221,7 @@ export async function extractListingItems(
   if (strategy === "html") {
     let items = await fetchHtml();
     let tier = "fetched-html";
-    if (items.length === 0) {
+    if (items.length === 0 && !htmlOutcome.storeError) {
       items = await browserHtmlWithRetry();
       tier = "browser-html";
     }
@@ -206,7 +233,7 @@ export async function extractListingItems(
   // HTML fetch preserves the exact ?sort_by=best-selling URL (no JS), so the
   // order is reliable; json only fills display fields.
   let htmlItems = await fetchHtml();
-  if (htmlItems.length === 0) htmlItems = await browserHtmlWithRetry();
+  if (htmlItems.length === 0 && !htmlOutcome.storeError) htmlItems = await browserHtmlWithRetry();
   // Full products.json index (not maxProducts-capped) so enrichment reaches
   // best-sellers that sit on later default-order pages of large catalogs.
   const shopifyItems = await shopifyIndex();
@@ -264,6 +291,7 @@ async function extractFetchedHtmlListingItems(
   maxPages: number,
   progress: ProgressReporter | undefined,
   warnings: string[],
+  outcome?: HtmlTierOutcome,
 ): Promise<ListingRankItem[]> {
   const byKey = new Map<string, ListingRankItem>();
 
@@ -271,7 +299,13 @@ async function extractFetchedHtmlListingItems(
     const pageUrl = buildPaginatedUrl(url, page);
     const result = await fetchCollectionPageHtml(pageUrl, url.origin);
     if (!result.ok) {
-      if (page === 1) warnings.push(result.warning);
+      if (page === 1) {
+        warnings.push(result.warning);
+        if (result.storeError && outcome) {
+          outcome.storeError = true;
+          if (result.status) outcome.status = result.status;
+        }
+      }
       break;
     }
 
@@ -296,7 +330,7 @@ async function extractFetchedHtmlListingItems(
 
 type CollectionPageFetch =
   | { ok: true; html: string; viaDirect: boolean; finalUrl: string }
-  | { ok: false; warning: string };
+  | { ok: false; warning: string; storeError?: boolean; status?: number };
 
 /** Max redirect hops to follow before giving up (guards against loops). */
 const MAX_SAFE_REDIRECTS = 4;
@@ -344,7 +378,7 @@ export async function fetchCollectionPageHtml(pageUrl: string, origin: string): 
 
   type Attempt =
     | { ok: true; html: string; finalUrl: string }
-    | { ok: false; blocked: boolean; warning: string };
+    | { ok: false; blocked: boolean; warning: string; storeError?: boolean; status?: number };
 
   const attempt = async (fetcher: typeof proxyFetch): Promise<Attempt> => {
     let currentUrl = pageUrl;
@@ -367,18 +401,33 @@ export async function fetchCollectionPageHtml(pageUrl: string, origin: string): 
           };
         }
         if (!response.ok) {
-          const blocked = isBlockedResponse(response.status, "", response.headers.get("server"));
+          const blocked = isBlockedResponse(
+            response.status,
+            "",
+            response.headers.get("server"),
+            response.headers.get("cf-mitigated"),
+          );
+          // A 5xx that is NOT a bot mitigation is the STORE failing to render the
+          // page (Shopify answers 500 "Something went wrong" for collections it
+          // cannot build — e.g. drune.de's /collections/all on a ~25k-product
+          // catalog). Retrying or switching IPs cannot fix that, so say so
+          // plainly instead of burying it in a generic "no products" error.
+          const storeError = !blocked && response.status >= 500;
           return {
             ok: false,
             blocked,
+            storeError,
+            status: response.status,
             warning: blocked
               ? `Fetched HTML blocked by bot protection (HTTP ${response.status}).`
-              : `Fetched HTML returned HTTP ${response.status}.`,
+              : storeError
+                ? `The store returned HTTP ${response.status} for this collection page — the listing itself is failing to render on the shop's server, so no ranking can be read from it.`
+                : `Fetched HTML returned HTTP ${response.status}.`,
           };
         }
         const html = await response.text();
-        if (isBlockedResponse(response.status, html, response.headers.get("server"))) {
-          return { ok: false, blocked: true, warning: "Fetched HTML returned a Cloudflare challenge; escalating." };
+        if (isBlockedResponse(response.status, html, response.headers.get("server"), response.headers.get("cf-mitigated"))) {
+          return { ok: false, blocked: true, warning: "Fetched HTML returned a bot-protection challenge; escalating." };
         }
         return { ok: true, html, finalUrl: currentUrl };
       } catch (err) {
@@ -397,7 +446,12 @@ export async function fetchCollectionPageHtml(pageUrl: string, origin: string): 
     const direct = await attempt(fetchDirect);
     if (direct.ok) return { ok: true, html: direct.html, viaDirect: true, finalUrl: direct.finalUrl };
   }
-  return { ok: false, warning: proxied.warning };
+  return {
+    ok: false,
+    warning: proxied.warning,
+    ...(proxied.storeError ? { storeError: true } : {}),
+    ...(proxied.status ? { status: proxied.status } : {}),
+  };
 }
 
 /**
@@ -662,9 +716,13 @@ async function extractShopifyListingItems(
 
   const items: ListingRankItem[] = [];
   const seen = new Set<string>();
+  // Feed path currently in use. Starts at the collection's own products.json and
+  // can degrade to the shop-wide /products.json — see rootFeedFallbackAvailable.
+  let feedPath: string = collectionPath;
+  let usedRootFeedFallback = false;
 
   for (let page = 1; page <= maxPages && items.length < itemCap; page++) {
-    const endpoint = `${url.origin}${collectionPath}/products.json?limit=250&page=${page}`;
+    const endpoint = `${url.origin}${feedPath}/products.json?limit=250&page=${page}`;
     let products: unknown;
     let redirected = false;
     try {
@@ -702,7 +760,34 @@ async function extractShopifyListingItems(
       }
       if (redirected || !response) break;
       if (!response.ok) {
-        if (page === 1) warnings.push(`Shopify products JSON returned HTTP ${response.status}.`);
+        // `/collections/all` is Shopify's virtual "every product" collection, so
+        // the shop-wide `/products.json` holds exactly the same catalog. When the
+        // collection feed itself errors (drune.de answers HTTP 500 for anything
+        // under /collections/all while /products.json serves fine), retry the
+        // same page against the root feed rather than returning nothing at all.
+        if (!usedRootFeedFallback && rootFeedFallbackAvailable(collectionPath)) {
+          usedRootFeedFallback = true;
+          feedPath = "";
+          warnings.push(
+            `The collection's products feed returned HTTP ${response.status}; ` +
+              "read the shop-wide /products.json instead (same catalog as /collections/all).",
+          );
+          page -= 1; // retry this page number against the root feed
+          continue;
+        }
+        if (page === 1) {
+          const blocked = isBlockedResponse(
+            response.status,
+            "",
+            response.headers.get("server"),
+            response.headers.get("cf-mitigated"),
+          );
+          warnings.push(
+            blocked
+              ? `The products feed was blocked by bot protection (HTTP ${response.status}).`
+              : `Shopify products JSON returned HTTP ${response.status}.`,
+          );
+        }
         break;
       }
       const data = (await response.json()) as unknown;
@@ -858,6 +943,17 @@ function createListingKey(url: URL): string {
   return `${normalized.hostname.toLowerCase()}|${path}${sortBy ? `|sort_by=${sortBy}` : ""}`;
 }
 
+/**
+ * Whether the shop-wide `/products.json` is an equivalent substitute for this
+ * collection's own feed. Only true for Shopify's virtual `all` collection (and
+ * the `vendors`/`types` catalog views), which by definition list every product —
+ * so falling back to the root feed returns the same set, never a different
+ * collection's products.
+ */
+function rootFeedFallbackAvailable(collectionPath: string): boolean {
+  return /\/collections\/(all|vendors|types)$/i.test(collectionPath);
+}
+
 function getShopifyCollectionPath(url: URL): string | null {
   const match = url.pathname.match(/^(.*?\/collections\/[^/?#]+)/i);
   const collectionPath = match?.[1]?.replace(/\/+$/, "");
@@ -932,11 +1028,43 @@ function decodeHandle(rawHandle: string): string {
  * #1). They link to a /products/ handle like a normal product, so they slip past
  * the grid filter — exclude them by handle so best-selling ranks stay clean.
  */
-const JUNK_PRODUCT_HANDLE_RE =
-  /(^|[-_])(?:(?:shipping|package|order|delivery)[-_]?(?:protection|insurance|guarantee)|route[-_]?insurance|seel[-_]?protection|worry[-_]?free|e?[-_]?gift[-_]?card|tip|tipping|donation|round[-_]?up)s?([-_]|$)/i;
+const JUNK_PRODUCT_HANDLE_RE = new RegExp(
+  [
+    // "shipping-protection", "order-insurance", "delivery-guarantee", …
+    "(?:shipping|package|parcel|order|delivery)[-_]?(?:protection|insurance|guarantee|warranty)",
+    // Bare "insurance"/"warranty" anywhere in the handle. byemiliarose.com sells
+    // "add-insurance-to-your-order-🔒" as a real /products/ handle, and it was
+    // outranking every genuine product at #1 because the words sit in an order
+    // the pair-patterns above never match.
+    "insurance",
+    "warranty",
+    "route[-_]?(?:insurance|protection)",
+    "seel[-_]?protection",
+    "worry[-_]?free",
+    // Priority/express *handling* upsells (not a shippable product).
+    "(?:priority|express|rush)[-_]?(?:shipping|processing|handling|delivery)",
+    "carbon[-_]?(?:neutral|offset)",
+    "e?[-_]?gift[-_]?card",
+    "tip",
+    "tipping",
+    "donation",
+    "round[-_]?up",
+  ].join("|"),
+  "i",
+);
+
+/**
+ * Handles that must never be treated as junk even though they contain a junk
+ * keyword — real apparel whose name happens to include one of the words above.
+ */
+const JUNK_HANDLE_EXCEPTION_RE = /(?:tip[-_]?toe|tulip|multi[-_]?tip)/i;
 
 function isJunkProductHandle(handle: string | undefined): boolean {
-  return handle ? JUNK_PRODUCT_HANDLE_RE.test(handle.toLowerCase()) : false;
+  if (!handle) return false;
+  const lower = handle.toLowerCase();
+  if (JUNK_HANDLE_EXCEPTION_RE.test(lower)) return false;
+  // Word-ish boundaries so "tip" matches "add-a-tip" but not "tipperary".
+  return new RegExp(`(^|[-_])(?:${JUNK_PRODUCT_HANDLE_RE.source})s?([-_]|$)`, "i").test(lower);
 }
 
 /**

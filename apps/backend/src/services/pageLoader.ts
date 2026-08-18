@@ -10,7 +10,7 @@ import {
   getProxyConfig,
   isBlockedResponse,
   isProxyHealthy,
-  markProxyUnhealthy,
+  markProxyBroken,
   fetchDirect,
   proxyFetch,
 } from "./antiBlock.js";
@@ -40,13 +40,17 @@ async function launchBrowserWithRetry(): Promise<Browser> {
   const maxAttempts = 3;
   let lastErr: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    // Last attempt drops the proxy: a browser that can't start (or can't tunnel)
+    // through a dead gateway is strictly worse than one running direct, and the
+    // browser tier is our only way past JS-rendered grids.
+    const useProxy = attempt < maxAttempts ? proxy : null;
     try {
       return await chromium.launch({
         headless: true,
         timeout: launchTimeoutMs,
         // Route through a residential/rotating proxy when configured — the only
         // reliable defense against Cloudflare IP-based blocking.
-        ...(proxy ? { proxy } : {}),
+        ...(useProxy ? { proxy: useProxy } : {}),
         args: [
           "--disable-blink-features=AutomationControlled",
           // Container-friendly flags (Railway): avoid /dev/shm crashes + GPU overhead.
@@ -219,7 +223,14 @@ export async function withBrowserSession<T>(
           // Detect a Cloudflare (or similar) challenge page so callers can fall
           // back instead of parsing the interstitial as if it were the product.
           const earlyHtml = await page.content();
-          if (isBlockedResponse(response?.status() ?? 200, earlyHtml, response?.headers()["server"])) {
+          if (
+            isBlockedResponse(
+              response?.status() ?? 200,
+              earlyHtml,
+              response?.headers()["server"],
+              response?.headers()["cf-mitigated"],
+            )
+          ) {
             throw new CheckError("PAGE_LOAD_FAILED", "Blocked by bot protection (Cloudflare challenge).");
           }
 
@@ -280,7 +291,7 @@ export async function withBrowserSession<T>(
           // A proxy connection failure shouldn't doom every later request — trip
           // the health flag so subsequent sessions launch direct.
           if (PROXY_ERROR_RE.test((err as Error).message)) {
-            markProxyUnhealthy("browser navigation", (err as Error).message);
+            markProxyBroken("browser navigation", (err as Error).message);
           }
           log.error("page load failed", { url, message: (err as Error).message });
           throw new CheckError("PAGE_LOAD_FAILED", `Failed to load page: ${(err as Error).message}`);
@@ -365,7 +376,7 @@ export async function fetchPageDirect(url: string): Promise<LoadedPage> {
   const toPage = async (res: Response): Promise<LoadedPage | null> => {
     if (!res.ok) return null;
     const html = await res.text();
-    if (isBlockedResponse(res.status, html, res.headers.get("server"))) return null;
+    if (isBlockedResponse(res.status, html, res.headers.get("server"), res.headers.get("cf-mitigated"))) return null;
     return { finalUrl: res.url || url, html, title: extractHtmlTitle(html) };
   };
 

@@ -790,3 +790,98 @@ describe("extractListingItems, shopify_json fallback warns about lost sort order
     expect(result.warnings.some((w) => w.includes("Best-selling order"))).toBe(false);
   });
 });
+
+describe("extractListingItems, drops order-insurance upsells whatever the word order", () => {
+  it("excludes 'add-insurance-to-your-order' from the ranking (byemiliarose.com rank #1)", async () => {
+    fetchHtmlPage1(
+      collectionHtml(["add-insurance-to-your-order", "womens-sandals", "package-protection", "womens-blazer"]),
+    );
+    const url = new URL("https://byemiliarose.com/collections/all?sort_by=best-selling");
+    const result = await extractListingItems(url, "html", 100, 1);
+
+    expect(result.items.map((i) => i.handle)).toEqual(["womens-sandals", "womens-blazer"]);
+  });
+
+  it("keeps real products whose handle merely contains a junk word", async () => {
+    fetchHtmlPage1(collectionHtml(["tip-toe-ballet-flats", "tulip-midi-dress"]));
+    const url = new URL("https://shop.example/collections/all?sort_by=best-selling");
+    const result = await extractListingItems(url, "html", 100, 1);
+
+    expect(result.items.map((i) => i.handle)).toEqual(["tip-toe-ballet-flats", "tulip-midi-dress"]);
+  });
+});
+
+describe("extractListingItems, falls back to the shop-wide products feed", () => {
+  /** drune.de: everything under /collections/all answers HTTP 500, /products.json is fine. */
+  function stubCollectionFeed500(): void {
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const u = new URL(input.toString());
+      const page = Number(u.searchParams.get("page") ?? "1");
+      if (u.pathname.startsWith("/collections/")) {
+        const res = new Response("<html><head><title>Something went wrong</title></head></html>", { status: 500 });
+        Object.defineProperty(res, "url", { value: u.toString() });
+        return res;
+      }
+      const products = page === 1 ? [{ id: 11, handle: "sweatshirt", title: "Sweatshirt" }, { id: 12, handle: "anzug", title: "Anzug" }] : [];
+      const res = jsonResponse({ products });
+      Object.defineProperty(res, "url", { value: u.toString() });
+      return res;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+  }
+
+  it("reads /products.json when the /collections/all feed 500s, and says the order is unreliable", async () => {
+    stubCollectionFeed500();
+    const url = new URL("https://drune.de/collections/all?sort_by=best-selling");
+    const result = await extractListingItems(url, "shopify_json", 100, 3);
+
+    expect(result.items.map((i) => i.handle)).toEqual(["sweatshirt", "anzug"]);
+    expect(result.warnings.some((w) => w.includes("shop-wide /products.json"))).toBe(true);
+    expect(result.warnings.some((w) => w.includes("Best-selling order could not be preserved"))).toBe(true);
+  });
+
+  it("does NOT substitute the shop-wide feed for a specific collection", async () => {
+    stubCollectionFeed500();
+    const url = new URL("https://drune.de/collections/anzuge?sort_by=best-selling");
+    const result = await extractListingItems(url, "shopify_json", 100, 3);
+
+    expect(result.items).toEqual([]);
+    expect(result.warnings.some((w) => w.includes("shop-wide /products.json"))).toBe(false);
+  });
+});
+
+describe("fetchCollectionPageHtml, distinguishes a store 5xx from a bot block", () => {
+  it("reports a store-side render failure for a plain HTTP 500", async () => {
+    const fetchMock = vi.fn(async () => new Response("<title>Something went wrong</title>", { status: 500 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchCollectionPageHtml(
+      "https://drune.de/collections/all?sort_by=best-selling",
+      "https://drune.de",
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.storeError).toBe(true);
+    expect(result.status).toBe(500);
+    expect(result.warning).toContain("failing to render on the shop's server");
+  });
+
+  it("still reports a bot block (not a store error) when cf-mitigated is set", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response("<title>Verifying your connection...</title>", {
+          status: 500,
+          headers: { "cf-mitigated": "challenge", server: "cloudflare" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchCollectionPageHtml("https://shop.example/collections/all", "https://shop.example");
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.storeError).toBeUndefined();
+    expect(result.warning).toContain("blocked by bot protection");
+  });
+});

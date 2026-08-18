@@ -1,7 +1,11 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   buildRealisticHeaders,
   isBlockedResponse,
+  isProxyHealthy,
+  markProxyBroken,
+  proxyDegradationReason,
+  resetProxyHealth,
   getProxyConfig,
   getProxyUrl,
   isProxyConfigured,
@@ -35,9 +39,91 @@ describe("isBlockedResponse", () => {
   it("passes a normal product page", () => {
     expect(isBlockedResponse(200, "<html><body><a href='/products/x'>X</a></body></html>", "nginx")).toBe(false);
   });
+
+  it("flags any response carrying a cf-mitigated header, whatever the status", () => {
+    // drune.de answers 429 with cf-mitigated: challenge; other shops use 200/500.
+    expect(isBlockedResponse(429, "", "cloudflare", "challenge")).toBe(true);
+    expect(isBlockedResponse(200, "<html>real grid</html>", "cloudflare", "challenge")).toBe(true);
+    expect(isBlockedResponse(500, "", "cloudflare", "challenge")).toBe(true);
+    // Absent/empty header must not flag an otherwise fine page.
+    expect(isBlockedResponse(200, "<html>real grid</html>", "cloudflare", null)).toBe(false);
+    expect(isBlockedResponse(200, "<html>real grid</html>", "cloudflare", "")).toBe(false);
+  });
+
+  it("flags Shopify's own bot interstitial by its body text", () => {
+    expect(isBlockedResponse(200, "<title>Verifying your connection...</title>", "cloudflare")).toBe(true);
+    expect(
+      isBlockedResponse(200, "<h1>Your connection needs to be verified before you can proceed</h1>", null),
+    ).toBe(true);
+    expect(isBlockedResponse(200, "<span>Enable JavaScript and cookies to continue</span>", null)).toBe(true);
+  });
+
+  it("treats a plain HTTP 500 as NOT blocked (that is the store failing, not a challenge)", () => {
+    expect(isBlockedResponse(500, "<title>Something went wrong</title>", "cloudflare")).toBe(false);
+  });
+});
+
+describe("markProxyBroken", () => {
+  it("disables a proxy and reports why", async () => {
+    process.env.SCRAPE_PROXY_URL = "http://user:pass@some.proxy:3120";
+    resetProxyHealth();
+    await runWithProxy(null, async () => {
+      expect(isProxyHealthy()).toBe(true);
+      markProxyBroken("proxyFetch", "auth fail");
+      expect(isProxyHealthy()).toBe(false);
+      expect(proxyDegradationReason()).toContain("auth fail");
+    });
+    resetProxyHealth();
+  });
+
+  it("disables a ROTATING pool too — a fresh exit IP cannot fix bad credentials", async () => {
+    // PROXY_ROTATING is read once at module load, so load a fresh module copy.
+    process.env.PROXY_ROTATING = "true";
+    process.env.SCRAPE_PROXY_URL = "http://user:pass@rotating.proxy:3120";
+    vi.resetModules();
+    const mod = await import("../src/services/antiBlock.js");
+    try {
+      await mod.runWithProxy(null, async () => {
+        expect(mod.isProxyRotating()).toBe(true);
+        expect(mod.isProxyHealthy()).toBe(true);
+        // A merely blocked exit IP must NOT disable a rotating pool…
+        mod.markProxyUnhealthy("browser navigation", "challenged exit");
+        expect(mod.isProxyHealthy()).toBe(true);
+        // …but a broken gateway (rejected credentials) must.
+        mod.markProxyBroken("proxyFetch", "auth fail smart-user");
+        expect(mod.isProxyHealthy()).toBe(false);
+        expect(mod.proxyDegradationReason()).toContain("auth fail");
+      });
+    } finally {
+      delete process.env.PROXY_ROTATING;
+      mod.resetProxyHealth();
+      vi.resetModules();
+    }
+  });
+
+  it("reports no degradation when no proxy is configured", async () => {
+    resetProxyHealth();
+    await runWithProxy(null, async () => {
+      expect(proxyDegradationReason()).toBeNull();
+    });
+  });
 });
 
 describe("buildRealisticHeaders", () => {
+  it("includes the high-entropy client hints Cloudflare asks for in critical-ch", () => {
+    const h = buildRealisticHeaders();
+    for (const key of [
+      "sec-ch-ua-arch",
+      "sec-ch-ua-bitness",
+      "sec-ch-ua-full-version",
+      "sec-ch-ua-full-version-list",
+      "sec-ch-ua-model",
+      "sec-ch-ua-platform-version",
+    ]) {
+      expect(h[key], key).toBeDefined();
+    }
+  });
+
   it("includes Chrome client hints and a user-agent", () => {
     const h = buildRealisticHeaders();
     expect(h["user-agent"]).toContain("Chrome");
