@@ -885,3 +885,49 @@ describe("fetchCollectionPageHtml, distinguishes a store 5xx from a bot block", 
     expect(result.warning).toContain("blocked by bot protection");
   });
 });
+
+describe("extractListingItems, retries a throttled products feed once", () => {
+  it("recovers the catalog when the first feed request is rate-limited (HTTP 429)", async () => {
+    let feedCalls = 0;
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const u = new URL(input.toString());
+      feedCalls += 1;
+      // First feed hit is throttled; the retry succeeds.
+      if (feedCalls === 1) {
+        const res = new Response("", { status: 429, headers: { "retry-after": "1" } });
+        Object.defineProperty(res, "url", { value: u.toString() });
+        return res;
+      }
+      const page = Number(u.searchParams.get("page") ?? "1");
+      const products = page === 1 ? [{ id: 1, handle: "sweatshirt", title: "Sweatshirt" }] : [];
+      const res = jsonResponse({ products });
+      Object.defineProperty(res, "url", { value: u.toString() });
+      return res;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const url = new URL("https://drune.de/collections/all?sort_by=best-selling");
+    const result = await extractListingItems(url, "shopify_json", 100, 2);
+
+    expect(result.items.map((i) => i.handle)).toEqual(["sweatshirt"]);
+  });
+
+  it("gives up after one retry instead of looping on a persistently throttled feed", async () => {
+    let feedCalls = 0;
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      feedCalls += 1;
+      const res = new Response("", { status: 429 });
+      Object.defineProperty(res, "url", { value: input.toString() });
+      return res;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const url = new URL("https://drune.de/collections/all?sort_by=best-selling");
+    const result = await extractListingItems(url, "shopify_json", 100, 2);
+
+    expect(result.items).toEqual([]);
+    // page 1 + exactly one retry, then stop.
+    expect(feedCalls).toBe(2);
+    expect(result.warnings.some((w) => w.includes("blocked by bot protection"))).toBe(true);
+  });
+});

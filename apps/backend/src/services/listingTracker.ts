@@ -186,7 +186,7 @@ export async function extractListingItems(
   // adds request volume that pushes the shop into rate-limiting us.
   const htmlOutcome: HtmlTierOutcome = { storeError: false };
   const fetchHtml = () => extractFetchedHtmlListingItems(url, maxProducts, maxPages, progress, warnings, htmlOutcome);
-  const browserHtml = () => extractHtmlListingItems(url, maxProducts, maxPages, progress, warnings);
+  const browserHtml = () => extractHtmlListingItems(url, maxProducts, maxPages, progress, warnings, htmlOutcome);
   // Ranking source: capped at maxProducts (order matters). Enrichment index:
   // full feed (bounded by maxPages) so every best-selling handle can be matched.
   const shopifyJson = () => extractShopifyListingItems(url, maxProducts, maxPages, progress, warnings);
@@ -200,8 +200,12 @@ export async function extractListingItems(
   // when rotating (a static/no proxy would just hit the same blocked IP again).
   const browserHtmlWithRetry = async (): Promise<ListingRankItem[]> => {
     let items = await browserHtml();
-    if (items.length > 0 || !isProxyRotating()) return items;
-    for (let attempt = 1; attempt <= LISTING_BROWSER_RETRY_ATTEMPTS && items.length === 0; attempt++) {
+    if (items.length > 0 || htmlOutcome.storeError || !isProxyRotating()) return items;
+    for (
+      let attempt = 1;
+      attempt <= LISTING_BROWSER_RETRY_ATTEMPTS && items.length === 0 && !htmlOutcome.storeError;
+      attempt++
+    ) {
       items = await browserHtml(); // fresh exit IP on the rotating gateway
     }
     return items;
@@ -253,6 +257,7 @@ async function extractHtmlListingItems(
   maxPages: number,
   progress: ProgressReporter | undefined,
   warnings: string[],
+  outcome?: HtmlTierOutcome,
 ): Promise<ListingRankItem[]> {
   try {
     const byKey = new Map<string, ListingRankItem>();
@@ -273,10 +278,19 @@ async function extractHtmlListingItems(
 
     return [...byKey.values()].map((item, index) => ({ ...item, rank: index + 1 }));
   } catch (err) {
-    warnings.push(`HTML listing extraction failed: ${(err as Error).message}`);
+    const message = (err as Error).message;
+    warnings.push(`HTML listing extraction failed: ${message}`);
+    // A definitive upstream status (the store's own 5xx, or a missing collection)
+    // is not something a fresh exit IP can change, so stop the retry loop. Blocks
+    // (403/429) and redirect-away cloaking are NOT matched here — those are
+    // exactly the cases a new exit IP does fix.
+    if (outcome && DEFINITIVE_UPSTREAM_STATUS_RE.test(message)) outcome.storeError = true;
     return [];
   }
 }
+
+/** "Page returned HTTP 500." / "…HTTP 404." — errors no retry or IP change fixes. */
+const DEFINITIVE_UPSTREAM_STATUS_RE = /returned HTTP (?:5\d\d|404)/i;
 
 /**
  * Like {@link extractHtmlListingItems} but with a plain `fetch()` instead of a

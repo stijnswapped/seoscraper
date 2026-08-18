@@ -4,7 +4,7 @@ const mocks = vi.hoisted(() => ({
   withBrowserSession: vi.fn(),
   buildRealisticHeaders: vi.fn(() => ({})),
   fetchDirect: vi.fn(),
-  isBlockedResponse: vi.fn(() => false),
+  isBlockedResponse: vi.fn((_status?: number, _html?: string, _server?: string | null, _cfMitigated?: string | null) => false),
   isProxyConfigured: vi.fn(() => true),
   isProxyRotating: vi.fn(() => true),
   proxyFetch: vi.fn(),
@@ -114,5 +114,41 @@ describe("extractListingItems, skips the browser when the STORE returned 5xx", (
     expect(result.sourceUsed).toBe("shopify_json");
     expect(result.items.map((i) => i.handle)).toEqual(["sweatshirt"]);
     expect(result.warnings.some((w) => w.includes("failing to render on the shop's server"))).toBe(true);
+  });
+});
+
+describe("extractListingItems, stops browser retries on a definitive upstream status", () => {
+  it("retries once at most when the browser hits the store's own HTTP 500", async () => {
+    // The collection fetch is throttled (429 → a block, so escalation is right),
+    // but every browser render then hits the store's 500. Retrying a 500 through
+    // fresh exit IPs cannot help, so the loop must stop instead of burning 6 renders.
+    mocks.isBlockedResponse.mockImplementation((status?: number) => status === 429);
+    mocks.proxyFetch.mockImplementation(async (input: string | URL) => {
+      const url = input.toString();
+      const res = new Response("", { status: 429 });
+      Object.defineProperty(res, "url", { value: url });
+      return res;
+    });
+    mocks.fetchDirect.mockImplementation(async (input: string | URL) => {
+      const res = new Response("", { status: 429 });
+      Object.defineProperty(res, "url", { value: input.toString() });
+      return res;
+    });
+
+    let browserAttempts = 0;
+    mocks.withBrowserSession.mockImplementation(async () => {
+      browserAttempts += 1;
+      throw new Error("Page returned HTTP 500.");
+    });
+
+    const result = await extractListingItems(
+      new URL("https://drune.de/collections/all?sort_by=best-selling"),
+      "auto",
+      50,
+      1,
+    );
+
+    expect(browserAttempts).toBe(1);
+    expect(result.items).toEqual([]);
   });
 });
