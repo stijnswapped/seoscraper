@@ -37,6 +37,8 @@ interface JobRecord {
   responseMode: "full" | "url" | undefined;
   startedAt: number;
   finishedAt?: number;
+  /** Set once a finished state has been sent to a client (POST or poll). */
+  delivered?: boolean;
   settled: boolean;
   state: JobState;
   promise: Promise<unknown>;
@@ -51,6 +53,24 @@ export function generateJobId(): string {
 
 export function getJob(jobId: string): JobRecord | undefined {
   return jobs.get(jobId);
+}
+
+/** Note that the finished result of this job has reached a client. */
+export function markJobDelivered(record: JobRecord): void {
+  if (record.state.status !== "running") record.delivered = true;
+}
+
+/**
+ * True while a job is still running, or finished less than `graceMs` ago and
+ * nobody has collected its result yet. A process exit would lose either (jobs
+ * live only in this process), so the browser self-restart waits for them.
+ */
+export function hasPendingJobs(graceMs: number, now = Date.now()): boolean {
+  for (const record of jobs.values()) {
+    if (record.state.status === "running") return true;
+    if (!record.delivered && record.finishedAt !== undefined && now - record.finishedAt < graceMs) return true;
+  }
+  return false;
 }
 
 export interface StartJobInput {

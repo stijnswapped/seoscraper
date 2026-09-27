@@ -12,6 +12,17 @@ ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
+# tini runs as PID 1 and reaps orphaned processes. Every Chromium session
+# leaves helpers (zygote, crashpad handler, renderers) that are re-parented to
+# PID 1 when the browser exits. npm/node never reap those, so without an init
+# they pile up as zombies until the container hits its task limit (pids.max);
+# from then on every chrome-headless-shell dies ~100ms into launch with a bare
+# signal=SIGTRAP until the container restarts. Railway has no `docker run
+# --init`, so the init has to live in the image.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tini \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # 1) Copy only the workspace manifests first for better layer caching.
@@ -34,5 +45,20 @@ COPY . .
 # Railway injects PORT; this is only documentation/local default.
 EXPOSE 3001
 
-# Applies DB migrations (when DATABASE_URL is set) then starts the API on 0.0.0.0.
-CMD ["npm", "run", "start:host", "--workspace", "apps/backend"]
+# Starts the API and applies DB migrations when DATABASE_URL is set. Same as
+# `npm run start:host --workspace apps/backend`, but node runs directly under
+# tini: no npm/sh/tsx-CLI wrapper processes, and signals reach the server.
+#  - `env -C apps/backend`: the working directory is apps/backend, exactly as
+#    with `npm --workspace`, so .env lookup and the relative OUTPUT_DIR resolve
+#    as before. WORKDIR itself stays /app, so an npm workspace command set as
+#    a start command elsewhere still works.
+#  - `HOST=0.0.0.0` on the command line, like start:host did: a HOST variable
+#    set in the platform (e.g. copied from .env.example) can't make the server
+#    bind to loopback and fail its healthcheck.
+#  - `tini -s`: also reaps as a subreaper if something else ends up as PID 1.
+# Leave the Railway service's Start Command EMPTY: a start command replaces this
+# ENTRYPOINT and so bypasses tini (the startup log then warns). It is not pinned
+# in railway.json because that file also applies to the frontend service
+# (apps/frontend/Dockerfile), whose image has neither tini nor the backend.
+ENTRYPOINT ["/usr/bin/tini", "-s", "-g", "--"]
+CMD ["env", "-C", "/app/apps/backend", "HOST=0.0.0.0", "node", "--import", "tsx", "src/index.ts"]

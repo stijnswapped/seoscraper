@@ -4,6 +4,7 @@ import { runMigrations } from "./db/migrate.js";
 import { getDatabaseUrl } from "./db/postgres.js";
 import { startStorageCleanup } from "./services/storageMaintenance.js";
 import { seedAdminUser } from "./services/adminSeed.js";
+import { orphansAreReaped, readProcessDiagnostics } from "./services/browserHealth.js";
 import { createLogger } from "./utils/logger.js";
 
 const log = createLogger("server");
@@ -27,6 +28,17 @@ async function main(): Promise<void> {
   const app = await buildServer();
   await app.listen({ port: PORT, host: HOST });
   log.info(`listening on http://${HOST}:${PORT}`);
+
+  // Every Chromium session leaves helper processes behind for an init (PID 1,
+  // or tini -s as our parent) to reap. Without one (e.g. a start command that
+  // bypasses tini) they pile up as zombies until browser launches start failing
+  // with SIGTRAP.
+  const runtime = readProcessDiagnostics();
+  if (runtime.pid1 !== undefined && !orphansAreReaped(runtime)) {
+    log.warn("no init reaps exited Chromium helpers (PID 1 and parent are not tini/an init)", runtime);
+  } else {
+    log.info("runtime", runtime);
+  }
 
   // Periodically prune old on-disk research runs so disk stays bounded.
   startStorageCleanup();

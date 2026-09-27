@@ -24,6 +24,7 @@ vi.mock("../src/services/antiBlock.js", () => ({
 }));
 
 import { extractListingItems } from "../src/services/listingTracker.js";
+import { BrowserUnavailableError } from "../src/types/productCheck.js";
 
 function jsonResponse(body: unknown, url: string): Response {
   const res = new Response(JSON.stringify(body), {
@@ -150,5 +151,39 @@ describe("extractListingItems, stops browser retries on a definitive upstream st
 
     expect(browserAttempts).toBe(1);
     expect(result.items).toEqual([]);
+  });
+});
+
+describe("extractListingItems, no browser retries when Chromium cannot start", () => {
+  it("tries the browser tier once, then goes straight to products.json", async () => {
+    // Rotating proxy + an empty fetched grid would normally allow 1+5 browser
+    // renders. When the launch itself fails (SIGTRAP on a worn-out container),
+    // every retry is another 3 doomed Chromium starts.
+    mocks.isBlockedResponse.mockImplementation(() => false);
+    mocks.isProxyRotating.mockImplementation(() => true);
+    mocks.proxyFetch.mockImplementation(async (input: string | URL) => {
+      const url = input.toString();
+      if (url.includes("/products.json")) {
+        return jsonResponse({ products: [{ id: 1, handle: "linen-dress", title: "Linen Dress" }] }, url);
+      }
+      return htmlResponse("<html><body><h1>Shop</h1></body></html>", url);
+    });
+
+    let browserAttempts = 0;
+    mocks.withBrowserSession.mockImplementation(async () => {
+      browserAttempts += 1;
+      throw new BrowserUnavailableError("Failed to launch browser after 3 attempts: signal=SIGTRAP");
+    });
+
+    const result = await extractListingItems(
+      new URL("https://shop.example/collections/all?sort_by=best-selling"),
+      "auto",
+      50,
+      1,
+    );
+
+    expect(browserAttempts).toBe(1);
+    expect(result.sourceUsed).toBe("shopify_json");
+    expect(result.items.map((i) => i.handle)).toEqual(["linen-dress"]);
   });
 });

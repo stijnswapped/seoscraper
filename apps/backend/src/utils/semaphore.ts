@@ -65,6 +65,11 @@ export class Semaphore {
     });
   }
 
+  /** Permits currently held (a permit handed straight to a waiter stays counted). */
+  get inUse(): number {
+    return this.active;
+  }
+
   /** Release a permit, handing it to the next waiter (if any) or freeing it. */
   release(): void {
     const next = this.waiters.shift();

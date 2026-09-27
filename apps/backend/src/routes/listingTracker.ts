@@ -6,6 +6,7 @@ import { requireApiKeyAuth } from "../services/apiAuth.js";
 import { scrapeRateLimit } from "../services/rateLimit.js";
 import { runWithProxy, validateProxyOverride } from "../services/antiBlock.js";
 import { logUsage, proxySource } from "../services/usageLogger.js";
+import { trackWork } from "../services/workTracker.js";
 import { CheckError } from "../types/productCheck.js";
 import type { ErrorCode } from "../types/productCheck.js";
 import { checkQuota, debitQuotaTopup, denyOverLimit, estimateListingUnits } from "../services/billing.js";
@@ -73,7 +74,8 @@ export function registerListingTrackerRoutes(app: FastifyInstance): void {
       progress({ phase: "queued", message: "Listing track accepted.", url: parsed.data.url });
       // Run the whole scrape under the resolved proxy. AsyncLocalStorage carries
       // it into every nested fetch, the browser launch, pagination and enrichment.
-      const result = await runWithProxy(proxyOverride, () =>
+      // trackWork: a browser self-restart waits for this run instead of cutting it off.
+      const result = await trackWork(() => runWithProxy(proxyOverride, () =>
         trackListing({
           url: parsed.data.url,
           // Scope the listing + its snapshot history to the authenticated user.
@@ -86,7 +88,7 @@ export function registerListingTrackerRoutes(app: FastifyInstance): void {
           progress,
           enrichSeo: parsed.data.enrich ?? false,
         }),
-      );
+      ));
 
       // Rank tracking is lean and DB-only: return the ranking + day-over-day
       // changes immediately. With `enrich`, each item also carries the real page

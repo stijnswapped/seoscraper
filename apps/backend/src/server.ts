@@ -11,6 +11,11 @@ import { registerListingTrackerRoutes } from "./routes/listingTracker.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerBillingRoutes } from "./routes/billing.js";
+import { getBrowserHealth, isAcceptingWork } from "./services/pageLoader.js";
+import type { ErrorCode } from "./types/productCheck.js";
+
+/** Scrape endpoints refused (503) while a self-restart drains. */
+const DRAINED_ROUTES = new Set(["/api/check-product", "/api/listings/track"]);
 
 export async function buildServer(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, bodyLimit: 1_048_576, trustProxy: true });
@@ -50,7 +55,27 @@ export async function buildServer(): Promise<FastifyInstance> {
     decorateReply: false,
   });
 
-  app.get("/health", async () => ({ ok: true }));
+  // Always 200 (the process is up and serving). `browser` shows whether
+  // headless launches still work and whether a self-restart is draining.
+  app.get("/health", async () => ({ ok: true, browser: getBrowserHealth() }));
+
+  // Last phase of a self-restart drain (see browserHealth): turn new scrape
+  // requests away with a retryable 503 so the in-flight ones can finish before
+  // the container is replaced. Polls, progress and everything else still work.
+  app.addHook("onRequest", async (request, reply) => {
+    if (request.method !== "POST" || isAcceptingWork()) return;
+    if (!DRAINED_ROUTES.has(request.routeOptions?.url ?? "")) return;
+    return reply
+      .status(503)
+      .header("Retry-After", "60")
+      .send({
+        success: false,
+        error: {
+          code: "SERVICE_RESTARTING" satisfies ErrorCode,
+          message: "The service is restarting to recover its headless browser. Retry in a minute.",
+        },
+      });
+  });
 
   registerCheckProductRoute(app);
   registerListingTrackerRoutes(app);

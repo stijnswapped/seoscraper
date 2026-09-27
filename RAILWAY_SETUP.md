@@ -5,7 +5,7 @@ This guide gets the backend (Fastify + Playwright + sharp + Postgres) running on
 The repo ships everything Railway needs:
 
 -   **`Dockerfile`** — Node 20 image that installs deps and Chromium (with all OS libraries via `playwright install --with-deps chromium`). Playwright "just works" — no fighting Nixpacks for browser dependencies.
--   **`railway.json`** — tells Railway to build from the Dockerfile, run the health check on `/health`, and restart on failure.
+-   **`railway.json`** — tells Railway to build from the Dockerfile, run the health check on `/health`, and always restart the service when its process exits (the `ALWAYS` policy needs a paid Railway plan; on Free/Trial use `ON_FAILURE` with `restartPolicyMaxRetries: 10`). It also applies to the frontend service, so keep it free of backend-only settings such as a start command. **Leave the backend's Start Command empty in the dashboard**: the image's `ENTRYPOINT` runs the server under `tini`, and a Start Command would replace it.
 -   **`.dockerignore`** — keeps `node_modules`, `output/`, and secrets out of the build context.
 -   **`.env.example`** — the full list of variables (copy values into Railway).
 
@@ -160,6 +160,18 @@ Hard cap on one browser session. On timeout the browser is force-closed and the 
 
 Max wait for a free browser slot before a check fails fast (instead of hanging) when the pool is saturated.
 
+`BROWSER_LAUNCH_FAILURES_BEFORE_EXIT`
+
+`3`
+
+Failed browser launches in a row (each already retried 3x; a browser that starts but cannot open a page counts as failed) after which the process drains and exits so Railway restarts it in a clean container. Only when the browser worked earlier in the same process. The drain exits as soon as nothing is in flight (no browser session, no `/api/listings/track` run, no check job running or waiting ≤60 s for its poll); still busy after 2 minutes, new `POST /api/check-product` and `/api/listings/track` requests get `503 SERVICE_RESTARTING` (`Retry-After: 60`); after 10 minutes it exits regardless. `0` = never.
+
+`BROWSER_SELF_RESTART`
+
+`true`
+
+Set `false` to disable that self-restart.
+
 `SCRAPE_PROXY_URL`
 
 `http://user:pass@host:port`
@@ -244,6 +256,10 @@ Checks stuck on `pending`, never resolve
 
 The shared browser wedged/overloaded. **Restart/redeploy the service** to clear it. To prevent recurrence, set `BROWSER_SESSION_DEADLINE_MS` + `BROWSER_ACQUIRE_TIMEOUT_MS` (above) and consider `BROWSER_MAX_CONCURRENCY=2` on a 2+ GB box.
 
+Every check fails with `Failed to launch browser after 3 attempts … signal=SIGTRAP`
+
+Chromium dies ~100 ms into launch with no error output: the container ran out of a hard resource, typically its task limit (`pids.max`) filled with zombie Chromium helpers that PID 1 never reaped. The service runs under `tini` (PID 1, and `-s` subreaper) to prevent this; the startup log line `runtime {"pid1":"tini",…}` confirms it (a warning is logged when neither PID 1 nor the parent process is an init). If that warning appears, clear the service's Start Command in Railway (Settings → Deploy) and redeploy. If it still happens, the process restarts itself after `BROWSER_LAUNCH_FAILURES_BEFORE_EXIT` failed launches, and each failure logs `pidsCurrent`, `pidsMax`, `memoryCurrentMb` and `zombies`. `GET /health` shows `browser.consecutiveLaunchFailures` and `browser.recycling`. Meanwhile `POST /api/check-product` answers `502 PAGE_LOAD_FAILED` as before, unless the request sets `"fetchFallback": true` (then: a plain-fetch result with a `BROWSER_UNAVAILABLE` warning).
+
 A specific store never scrapes (others work)
 
 Cloudflare/anti-bot is blocking the scraper's IP. Configure `SCRAPE_PROXY_URL` (residential/rotating) + `PROXY_ROTATING=true`. Without a working proxy those stores keep failing.
@@ -257,10 +273,18 @@ If using an external DB URL, append `?sslmode=require`.
 ## How the build works (reference)
 
 ```dockerfile
-FROM node:20-bookworm-slimENV NODE_ENV=production HOST=0.0.0.0 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright# ... copy manifests, npm ci --include=dev ...RUN npx playwright install --with-deps chromium   # Chromium + OS libraries# ... copy source ...CMD ["npm", "run", "start:host", "--workspace", "apps/backend"]
+FROM node:20-bookworm-slim
+ENV NODE_ENV=production HOST=0.0.0.0 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN apt-get install -y --no-install-recommends tini   # init for PID 1
+# ... copy manifests, npm ci --include=dev ...
+RUN npx playwright install --with-deps chromium   # Chromium + OS libraries
+# ... copy source ...
+ENTRYPOINT ["/usr/bin/tini", "-s", "-g", "--"]   # PID 1 reaps exited Chromium helpers
+CMD ["env", "-C", "/app/apps/backend", "HOST=0.0.0.0", "node", "--import", "tsx", "src/index.ts"]
+# keep the Railway Start Command empty, or it replaces this ENTRYPOINT (and tini)
 ```
 
-`start:host` runs `HOST=0.0.0.0 tsx src/index.ts`, which:
+The CMD is the same as `npm run start:host --workspace apps/backend` (`HOST=0.0.0.0 tsx src/index.ts`, run in `apps/backend`) without the npm/tsx wrapper processes. It:
 
 1.  loads env vars,
 2.  applies DB migrations when `DATABASE_URL` is set,
