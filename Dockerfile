@@ -56,7 +56,9 @@ EXPOSE 3001
 #    set in the platform (e.g. copied from .env.example) can't make the server
 #    bind to loopback and fail its healthcheck.
 #  - `tini -s`: also reaps as a subreaper if something else ends up as PID 1.
-# railway.json pins the same command as startCommand, so a start command set
-# in the Railway dashboard can't bypass tini. Keep the two in sync.
+# Leave the Railway service's Start Command EMPTY: a start command replaces this
+# ENTRYPOINT and so bypasses tini (the startup log then warns). It is not pinned
+# in railway.json because that file also applies to the frontend service
+# (apps/frontend/Dockerfile), whose image has neither tini nor the backend.
 ENTRYPOINT ["/usr/bin/tini", "-s", "-g", "--"]
 CMD ["env", "-C", "/app/apps/backend", "HOST=0.0.0.0", "node", "--import", "tsx", "src/index.ts"]

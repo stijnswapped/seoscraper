@@ -5,7 +5,7 @@ This guide gets the backend (Fastify + Playwright + sharp + Postgres) running on
 The repo ships everything Railway needs:
 
 -   **`Dockerfile`** — Node 20 image that installs deps and Chromium (with all OS libraries via `playwright install --with-deps chromium`). Playwright "just works" — no fighting Nixpacks for browser dependencies.
--   **`railway.json`** — tells Railway to build from the Dockerfile, pins the start command (under `tini`, see below; it overrides any Start Command set in the dashboard), runs the health check on `/health`, and always restarts the service when its process exits (the `ALWAYS` policy needs a paid Railway plan; on Free/Trial use `ON_FAILURE` with `restartPolicyMaxRetries: 10`).
+-   **`railway.json`** — tells Railway to build from the Dockerfile, run the health check on `/health`, and always restart the service when its process exits (the `ALWAYS` policy needs a paid Railway plan; on Free/Trial use `ON_FAILURE` with `restartPolicyMaxRetries: 10`). It also applies to the frontend service, so keep it free of backend-only settings such as a start command. **Leave the backend's Start Command empty in the dashboard**: the image's `ENTRYPOINT` runs the server under `tini`, and a Start Command would replace it.
 -   **`.dockerignore`** — keeps `node_modules`, `output/`, and secrets out of the build context.
 -   **`.env.example`** — the full list of variables (copy values into Railway).
 
@@ -258,7 +258,7 @@ The shared browser wedged/overloaded. **Restart/redeploy the service** to clear 
 
 Every check fails with `Failed to launch browser after 3 attempts … signal=SIGTRAP`
 
-Chromium dies ~100 ms into launch with no error output: the container ran out of a hard resource, typically its task limit (`pids.max`) filled with zombie Chromium helpers that PID 1 never reaped. The service runs under `tini` (PID 1, and `-s` subreaper) to prevent this; the startup log line `runtime {"pid1":"tini",…}` confirms it (a warning is logged when neither PID 1 nor the parent process is an init). `railway.json` pins the start command so a dashboard Start Command can't bypass tini. If it still happens, the process restarts itself after `BROWSER_LAUNCH_FAILURES_BEFORE_EXIT` failed launches, and each failure logs `pidsCurrent`, `pidsMax`, `memoryCurrentMb` and `zombies`. `GET /health` shows `browser.consecutiveLaunchFailures` and `browser.recycling`. Meanwhile `POST /api/check-product` answers `502 PAGE_LOAD_FAILED` as before, unless the request sets `"fetchFallback": true` (then: a plain-fetch result with a `BROWSER_UNAVAILABLE` warning).
+Chromium dies ~100 ms into launch with no error output: the container ran out of a hard resource, typically its task limit (`pids.max`) filled with zombie Chromium helpers that PID 1 never reaped. The service runs under `tini` (PID 1, and `-s` subreaper) to prevent this; the startup log line `runtime {"pid1":"tini",…}` confirms it (a warning is logged when neither PID 1 nor the parent process is an init). If that warning appears, clear the service's Start Command in Railway (Settings → Deploy) and redeploy. If it still happens, the process restarts itself after `BROWSER_LAUNCH_FAILURES_BEFORE_EXIT` failed launches, and each failure logs `pidsCurrent`, `pidsMax`, `memoryCurrentMb` and `zombies`. `GET /health` shows `browser.consecutiveLaunchFailures` and `browser.recycling`. Meanwhile `POST /api/check-product` answers `502 PAGE_LOAD_FAILED` as before, unless the request sets `"fetchFallback": true` (then: a plain-fetch result with a `BROWSER_UNAVAILABLE` warning).
 
 A specific store never scrapes (others work)
 
@@ -281,7 +281,7 @@ RUN npx playwright install --with-deps chromium   # Chromium + OS libraries
 # ... copy source ...
 ENTRYPOINT ["/usr/bin/tini", "-s", "-g", "--"]   # PID 1 reaps exited Chromium helpers
 CMD ["env", "-C", "/app/apps/backend", "HOST=0.0.0.0", "node", "--import", "tsx", "src/index.ts"]
-# railway.json startCommand repeats this line (tini included), so keep the two in sync
+# keep the Railway Start Command empty, or it replaces this ENTRYPOINT (and tini)
 ```
 
 The CMD is the same as `npm run start:host --workspace apps/backend` (`HOST=0.0.0.0 tsx src/index.ts`, run in `apps/backend`) without the npm/tsx wrapper processes. It:
