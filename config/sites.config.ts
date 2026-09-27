@@ -85,6 +85,16 @@ export interface SitesConfig {
      */
     acquireTimeoutMs: number;
     /**
+     * Failed browser launches in a row (each already retried 3x) after which
+     * the process exits non-zero so the platform restarts it in a clean
+     * container. Only kicks in when the browser DID launch earlier in this
+     * process: a browser that never started is a build problem a restart can't
+     * fix. Callers fall back to a plain fetch meanwhile.
+     */
+    launchFailuresBeforeExit: number;
+    /** Master switch for that self-restart (BROWSER_SELF_RESTART=false disables it). */
+    selfRestart: boolean;
+    /**
      * Abort image/media/font requests in the headless browser. SEO/rank
      * extraction reads the DOM (links, <title>, JSON-LD, <img> attributes), so
      * the rendered pixels are never needed — blocking them cuts proxy bytes
@@ -215,6 +225,8 @@ export const sitesConfig: SitesConfig = {
     launchTimeoutMs: envInt("BROWSER_LAUNCH_TIMEOUT_MS", 45000),
     sessionDeadlineMs: envInt("BROWSER_SESSION_DEADLINE_MS", 180000),
     acquireTimeoutMs: envInt("BROWSER_ACQUIRE_TIMEOUT_MS", 120000),
+    launchFailuresBeforeExit: envInt("BROWSER_LAUNCH_FAILURES_BEFORE_EXIT", 3),
+    selfRestart: envBool("BROWSER_SELF_RESTART", true),
     blockAssets: envBool("BLOCK_BROWSER_ASSETS", true),
     blockStylesheets: envBool("BLOCK_BROWSER_STYLESHEETS", false),
   },

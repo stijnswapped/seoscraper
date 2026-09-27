@@ -8,7 +8,7 @@ import type {
   ListingSourceStrategy,
   ListingSourceUsed,
 } from "../types/productCheck.js";
-import { CheckError } from "../types/productCheck.js";
+import { BrowserUnavailableError, CheckError } from "../types/productCheck.js";
 import { assertDomainAllowed, safeCollectionRedirectTarget, validateAndNormalizeUrl } from "../utils/url.js";
 import { withBrowserSession } from "./pageLoader.js";
 import { buildRealisticHeaders, fetchDirect, isBlockedResponse, isProxyConfigured, isProxyRotating, proxyDegradationReason, proxyFetch } from "./antiBlock.js";
@@ -44,6 +44,8 @@ interface HtmlTierOutcome {
   /** The shop answered 5xx (not a bot challenge) — its own page is broken. */
   storeError: boolean;
   status?: number;
+  /** Chromium could not be started at all: another browser attempt only piles up more failed launches. */
+  browserUnavailable?: boolean;
 }
 
 interface ExtractionResult {
@@ -200,10 +202,13 @@ export async function extractListingItems(
   // when rotating (a static/no proxy would just hit the same blocked IP again).
   const browserHtmlWithRetry = async (): Promise<ListingRankItem[]> => {
     let items = await browserHtml();
-    if (items.length > 0 || htmlOutcome.storeError || !isProxyRotating()) return items;
+    if (items.length > 0 || htmlOutcome.storeError || htmlOutcome.browserUnavailable || !isProxyRotating()) return items;
     for (
       let attempt = 1;
-      attempt <= LISTING_BROWSER_RETRY_ATTEMPTS && items.length === 0 && !htmlOutcome.storeError;
+      attempt <= LISTING_BROWSER_RETRY_ATTEMPTS &&
+      items.length === 0 &&
+      !htmlOutcome.storeError &&
+      !htmlOutcome.browserUnavailable;
       attempt++
     ) {
       items = await browserHtml(); // fresh exit IP on the rotating gateway
@@ -285,6 +290,8 @@ async function extractHtmlListingItems(
     // (403/429) and redirect-away cloaking are NOT matched here — those are
     // exactly the cases a new exit IP does fix.
     if (outcome && DEFINITIVE_UPSTREAM_STATUS_RE.test(message)) outcome.storeError = true;
+    // No browser could be launched: a fresh exit IP changes nothing about that.
+    if (outcome && err instanceof BrowserUnavailableError) outcome.browserUnavailable = true;
     return [];
   }
 }

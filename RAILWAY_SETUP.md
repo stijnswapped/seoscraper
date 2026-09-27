@@ -5,7 +5,7 @@ This guide gets the backend (Fastify + Playwright + sharp + Postgres) running on
 The repo ships everything Railway needs:
 
 -   **`Dockerfile`** — Node 20 image that installs deps and Chromium (with all OS libraries via `playwright install --with-deps chromium`). Playwright "just works" — no fighting Nixpacks for browser dependencies.
--   **`railway.json`** — tells Railway to build from the Dockerfile, run the health check on `/health`, and restart on failure.
+-   **`railway.json`** — tells Railway to build from the Dockerfile, run the health check on `/health`, and always restart the service when its process exits.
 -   **`.dockerignore`** — keeps `node_modules`, `output/`, and secrets out of the build context.
 -   **`.env.example`** — the full list of variables (copy values into Railway).
 
@@ -160,6 +160,18 @@ Hard cap on one browser session. On timeout the browser is force-closed and the 
 
 Max wait for a free browser slot before a check fails fast (instead of hanging) when the pool is saturated.
 
+`BROWSER_LAUNCH_FAILURES_BEFORE_EXIT`
+
+`3`
+
+Failed browser launches in a row (each already retried 3x) after which the process exits so Railway restarts it in a clean container. Only when the browser launched fine earlier in the same process. Checks fall back to a plain fetch meanwhile.
+
+`BROWSER_SELF_RESTART`
+
+`true`
+
+Set `false` to disable that self-restart.
+
 `SCRAPE_PROXY_URL`
 
 `http://user:pass@host:port`
@@ -244,6 +256,10 @@ Checks stuck on `pending`, never resolve
 
 The shared browser wedged/overloaded. **Restart/redeploy the service** to clear it. To prevent recurrence, set `BROWSER_SESSION_DEADLINE_MS` + `BROWSER_ACQUIRE_TIMEOUT_MS` (above) and consider `BROWSER_MAX_CONCURRENCY=2` on a 2+ GB box.
 
+Every check fails with `Failed to launch browser after 3 attempts … signal=SIGTRAP`
+
+Chromium dies ~100 ms into launch with no error output: the container ran out of a hard resource, typically its task limit (`pids.max`) filled with zombie Chromium helpers that PID 1 never reaped. The image runs `tini` as PID 1 to prevent this; the startup log line `runtime {"pid1":"tini",…}` confirms it (a warning is logged when PID 1 is not an init, e.g. when a custom Start Command bypasses the image ENTRYPOINT — leave the Start Command empty). If it still happens, the process restarts itself after `BROWSER_LAUNCH_FAILURES_BEFORE_EXIT` failed launches, and each failure logs `pidsCurrent`, `pidsMax`, `memoryCurrentMb` and `zombies`. `GET /health` shows `browser.consecutiveLaunchFailures`.
+
 A specific store never scrapes (others work)
 
 Cloudflare/anti-bot is blocking the scraper's IP. Configure `SCRAPE_PROXY_URL` (residential/rotating) + `PROXY_ROTATING=true`. Without a working proxy those stores keep failing.
@@ -257,10 +273,18 @@ If using an external DB URL, append `?sslmode=require`.
 ## How the build works (reference)
 
 ```dockerfile
-FROM node:20-bookworm-slimENV NODE_ENV=production HOST=0.0.0.0 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright# ... copy manifests, npm ci --include=dev ...RUN npx playwright install --with-deps chromium   # Chromium + OS libraries# ... copy source ...CMD ["npm", "run", "start:host", "--workspace", "apps/backend"]
+FROM node:20-bookworm-slim
+ENV NODE_ENV=production HOST=0.0.0.0 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN apt-get install -y --no-install-recommends tini   # init for PID 1
+# ... copy manifests, npm ci --include=dev ...
+RUN npx playwright install --with-deps chromium   # Chromium + OS libraries
+# ... copy source ...
+WORKDIR /app/apps/backend
+ENTRYPOINT ["/usr/bin/tini", "-g", "--"]   # PID 1 reaps exited Chromium helpers
+CMD ["node", "--import", "tsx", "src/index.ts"]
 ```
 
-`start:host` runs `HOST=0.0.0.0 tsx src/index.ts`, which:
+The CMD is the same as `npm run start:host --workspace apps/backend` (`HOST=0.0.0.0 tsx src/index.ts`) without the npm/tsx wrapper processes. It:
 
 1.  loads env vars,
 2.  applies DB migrations when `DATABASE_URL` is set,

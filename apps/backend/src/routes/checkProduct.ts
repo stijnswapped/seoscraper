@@ -18,7 +18,7 @@ import {
 } from "../utils/url.js";
 import {
   loadPageOrFetch,
-  withBrowserSession,
+  withBrowserSessionOrFetch,
   type BrowserSession,
 } from "../services/pageLoader.js";
 import type { LoadedPage } from "../services/pageLoader.js";
@@ -126,7 +126,12 @@ export async function runCheck(
 
   progress({ phase: "loading", message: "Rendering input URL.", url: url.toString() });
 
-  return withBrowserSession(async (session) => {
+  // If Chromium cannot be started at all, still run the check on a plain fetch
+  // (server-rendered title/meta/JSON-LD) instead of failing it outright.
+  const onBrowserUnavailable = (reason: string) =>
+    progress({ phase: "loading", message: `Browser unavailable (${reason}); continuing with direct fetch.`, url: url.toString() });
+
+  return withBrowserSessionOrFetch(async (session) => {
    const page = await loadPageOrFetch(
      url.toString(),
      { scrollProfile: guessScrollProfile(url) },
@@ -153,7 +158,7 @@ export async function runCheck(
      session,
      progress,
    );
-  });
+  }, onBrowserUnavailable);
 }
 
 function guessScrollProfile(url: URL): "product" | "listing" {

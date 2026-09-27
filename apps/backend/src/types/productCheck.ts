@@ -243,6 +243,19 @@ export class CheckError extends Error {
   }
 }
 
+/**
+ * The headless browser could not be obtained at all (launch failed after its
+ * retries, no free slot, or the process is restarting to recover Chromium).
+ * Thrown before any page work starts, so callers can safely continue with a
+ * plain fetch instead of failing the check.
+ */
+export class BrowserUnavailableError extends CheckError {
+  constructor(message: string) {
+    super("PAGE_LOAD_FAILED", message);
+    this.name = "BrowserUnavailableError";
+  }
+}
+
 /** Raw metadata blob saved to raw/metadata.json for debugging. */
 export interface RawMetadata {
   finalUrl: string;

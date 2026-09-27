@@ -1,9 +1,10 @@
 import { chromium, type Browser, type Page } from "playwright";
 import { sitesConfig } from "../../../../config/sites.config.js";
-import { CheckError } from "../types/productCheck.js";
+import { BrowserUnavailableError, CheckError } from "../types/productCheck.js";
 import { createLogger } from "../utils/logger.js";
 import { stripLocalePrefix } from "../utils/url.js";
 import { Semaphore, SemaphoreAcquireTimeoutError } from "../utils/semaphore.js";
+import { createBrowserHealth, type BrowserHealthSnapshot } from "./browserHealth.js";
 import {
   STEALTH_INIT_SCRIPT,
   buildRealisticHeaders,
@@ -22,16 +23,37 @@ const log = createLogger("pageLoader");
 
 /**
  * Caps concurrent Chromium processes across ALL in-flight requests. Without
- * this, N simultaneous requests each launch their own browser and OOM-kill the
- * container (the SIGTRAP-during-launch crash). Tune via BROWSER_MAX_CONCURRENCY.
+ * this, N simultaneous requests each launch their own browser and exhaust the
+ * container's memory. Tune via BROWSER_MAX_CONCURRENCY.
  */
 const browserSlots = new Semaphore(sitesConfig.browser.maxConcurrency);
 
 /**
- * Launch Chromium with an explicit timeout and a couple of retries. The
- * chrome-headless-shell process occasionally dies mid-launch under memory
- * pressure (exitCode=null, signal=SIGTRAP); a transient failure shouldn't sink
- * the whole check.
+ * Longest we wait for browser.close() before releasing the slot anyway.
+ * Playwright's own close() is graceful for 30s and then SIGKILLs the browser's
+ * whole process group, so waiting a little past that means the next session
+ * never starts while the previous Chromium is still alive.
+ */
+const BROWSER_CLOSE_WAIT_MS = 35_000;
+
+/** Launch outcomes; recycles the process when Chromium can no longer start. */
+const browserHealth = createBrowserHealth({
+  failuresBeforeExit: sitesConfig.browser.selfRestart ? sitesConfig.browser.launchFailuresBeforeExit : 0,
+  graceMs: 30_000,
+});
+
+/** Launch stats for /health. */
+export function getBrowserHealth(): BrowserHealthSnapshot {
+  return browserHealth.snapshot();
+}
+
+/**
+ * Launch Chromium with an explicit timeout and a couple of retries, so one
+ * transient failure doesn't sink the whole check. When EVERY attempt dies
+ * ~100ms in with `exitCode=null, signal=SIGTRAP` and no stderr, that is not a
+ * transient: Chromium hit a hard container limit (typically pids.max, filled
+ * with unreaped zombie helpers). Retrying can't fix that; browserHealth
+ * restarts the process once it keeps happening.
  */
 async function launchBrowserWithRetry(): Promise<Browser> {
   const { launchTimeoutMs } = sitesConfig.browser;
@@ -45,7 +67,7 @@ async function launchBrowserWithRetry(): Promise<Browser> {
     // browser tier is our only way past JS-rendered grids.
     const useProxy = attempt < maxAttempts ? proxy : null;
     try {
-      return await chromium.launch({
+      const launched = await chromium.launch({
         headless: true,
         timeout: launchTimeoutMs,
         // Route through a residential/rotating proxy when configured — the only
@@ -59,16 +81,17 @@ async function launchBrowserWithRetry(): Promise<Browser> {
           "--disable-gpu",
         ],
       });
+      browserHealth.recordLaunchSuccess();
+      return launched;
     } catch (err) {
       lastErr = err;
       log.warn("browser launch failed", { attempt, maxAttempts, message: (err as Error).message });
       if (attempt < maxAttempts) await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
     }
   }
-  throw new CheckError(
-    "PAGE_LOAD_FAILED",
-    `Failed to launch browser after ${maxAttempts} attempts: ${(lastErr as Error)?.message ?? "unknown error"}`,
-  );
+  const message = `Failed to launch browser after ${maxAttempts} attempts: ${(lastErr as Error)?.message ?? "unknown error"}`;
+  browserHealth.recordLaunchFailure(message);
+  throw new BrowserUnavailableError(message);
 }
 
 export interface LoadedPage {
@@ -145,6 +168,12 @@ export async function withBrowserSession<T>(
   const { browser } = sitesConfig;
   let browserInstance: Browser | null = null;
 
+  // The process is about to exit so the platform can restart it with a clean
+  // container; don't start (and leave behind) yet another doomed Chromium.
+  if (browserHealth.isRecycling()) {
+    throw new BrowserUnavailableError("Browser unavailable: the service is restarting to recover Chromium.");
+  }
+
   // Hold a global slot for the entire session so we never exceed the configured
   // number of live Chromium processes, no matter how many requests arrive. Time-
   // box the wait: if the pool is wedged, fail fast with a clear error instead of
@@ -153,13 +182,21 @@ export async function withBrowserSession<T>(
     await browserSlots.acquire(browser.acquireTimeoutMs);
   } catch (err) {
     if (err instanceof SemaphoreAcquireTimeoutError) {
-      throw new CheckError(
-        "PAGE_LOAD_FAILED",
+      throw new BrowserUnavailableError(
         `Browser pool saturated: no free slot after ${Math.round(browser.acquireTimeoutMs / 1000)}s.`,
       );
     }
     throw err;
   }
+
+  // One close per browser, shared by the deadline timer and the finally below
+  // (a second browser.close() adds nothing in Playwright; it only waits).
+  let closing: Promise<void> | null = null;
+  const closeBrowser = (): Promise<void> => {
+    if (!browserInstance) return Promise.resolve();
+    closing ??= browserInstance.close().catch(() => {});
+    return closing;
+  };
 
   // Safety net: if a session ever wedges (hung Chromium, a page that never
   // settles), force-close the browser at the deadline. That aborts in-flight
@@ -171,7 +208,7 @@ export async function withBrowserSession<T>(
     log.error("session exceeded deadline; force-closing browser to release the slot", {
       deadlineMs: browser.sessionDeadlineMs,
     });
-    browserInstance?.close().catch(() => {});
+    void closeBrowser();
   }, browser.sessionDeadlineMs);
   killTimer.unref?.();
 
@@ -316,17 +353,65 @@ export async function withBrowserSession<T>(
     }
   } finally {
     clearTimeout(killTimer);
-    // Cap close() so a hung/OOM'd chrome-headless-shell can't stall here. With
-    // maxConcurrency=1 a stuck close would never release the sole browser permit,
-    // wedging every later check in permanent "pending". Release is guaranteed
-    // within the timeout regardless of what close() does.
-    if (browserInstance) {
-      await Promise.race([
-        browserInstance.close().catch(() => {}),
-        new Promise((resolve) => setTimeout(resolve, 5_000)),
-      ]);
+    // Wait for the browser to be gone before handing the slot on: Playwright
+    // escalates a hung close to SIGKILL on the process group after 30s, so this
+    // normally resolves well inside BROWSER_CLOSE_WAIT_MS. Still capped, so a
+    // stuck close can never hold the sole permit and wedge every later check in
+    // permanent "pending".
+    if (browserInstance && !(await settlesWithin(closeBrowser(), BROWSER_CLOSE_WAIT_MS))) {
+      log.warn("browser did not close in time; releasing the slot anyway", { waitedMs: BROWSER_CLOSE_WAIT_MS });
     }
     browserSlots.release();
+  }
+}
+
+/**
+ * A session for when no browser can be had: every render fails straight away
+ * with `reason`, so loadPageOrFetch takes its direct-fetch fallback.
+ */
+function browserlessSession(reason: string): BrowserSession {
+  return {
+    async loadPage() {
+      throw new BrowserUnavailableError(reason);
+    },
+  };
+}
+
+/**
+ * {@link withBrowserSession}, but when Chromium can't be obtained at all (launch
+ * failure, saturated pool, process restarting) run `fn` without a browser: its
+ * pages load via plain fetch, which still carries the server-rendered SEO tags
+ * (<title>, meta, JSON-LD). Only launch-stage failures fall through — once `fn`
+ * has started, its errors propagate unchanged, so it never runs twice.
+ */
+export async function withBrowserSessionOrFetch<T>(
+  fn: (session: BrowserSession) => Promise<T>,
+  onUnavailable?: (reason: string) => void,
+): Promise<T> {
+  let started = false;
+  try {
+    return await withBrowserSession((session) => {
+      started = true;
+      return fn(session);
+    });
+  } catch (err) {
+    if (started || !(err instanceof BrowserUnavailableError)) throw err;
+    log.warn("browser unavailable; continuing with direct fetch", { reason: err.message });
+    onUnavailable?.(err.message);
+    return fn(browserlessSession(err.message));
+  }
+}
+
+/** Resolve true if `work` settles within `ms`, false otherwise (never rejects). */
+async function settlesWithin(work: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), ms);
+  });
+  try {
+    return await Promise.race([work.then(() => true, () => true), timeout]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 

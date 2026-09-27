@@ -11,6 +11,7 @@ import { registerListingTrackerRoutes } from "./routes/listingTracker.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerBillingRoutes } from "./routes/billing.js";
+import { getBrowserHealth } from "./services/pageLoader.js";
 
 export async function buildServer(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, bodyLimit: 1_048_576, trustProxy: true });
@@ -50,7 +51,9 @@ export async function buildServer(): Promise<FastifyInstance> {
     decorateReply: false,
   });
 
-  app.get("/health", async () => ({ ok: true }));
+  // Always 200 (the process is up and serving; checks fall back to fetch when
+  // Chromium is down). `browser` shows whether headless launches still work.
+  app.get("/health", async () => ({ ok: true, browser: getBrowserHealth() }));
 
   registerCheckProductRoute(app);
   registerListingTrackerRoutes(app);

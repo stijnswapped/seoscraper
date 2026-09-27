@@ -4,7 +4,7 @@ import { createLogger } from "../utils/logger.js";
 import { runWithConcurrency } from "../utils/concurrency.js";
 import { createProgressReporter, finishProgress } from "./progressHub.js";
 import { runSingleProductCheck } from "../routes/checkProduct.js";
-import { withBrowserSession } from "./pageLoader.js";
+import { withBrowserSessionOrFetch } from "./pageLoader.js";
 
 const log = createLogger("listingEnrichment");
 
@@ -34,7 +34,8 @@ async function runEnrichment(snapshot: ListingRankSnapshot, runId?: string): Pro
   });
 
   try {
-    await withBrowserSession(async (session) =>
+    // No Chromium? Enrich from plain fetches rather than failing every product.
+    await withBrowserSessionOrFetch(async (session) =>
       runWithConcurrency(items, concurrency, async (item) => {
         try {
           const { fileBaseUrl } = await runSingleProductCheck(item.url, progress, session);
