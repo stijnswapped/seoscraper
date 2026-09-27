@@ -230,6 +230,7 @@ export type ErrorCode =
   | "IMAGE_DOWNLOAD_FAILED"
   | "OUTPUT_WRITE_FAILED"
   | "JOB_NOT_FOUND"
+  | "SERVICE_RESTARTING"
   | "UNKNOWN_ERROR";
 
 /** Thrown internally; carries a stable error code for the API layer. */

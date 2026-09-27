@@ -45,11 +45,18 @@ COPY . .
 # Railway injects PORT; this is only documentation/local default.
 EXPOSE 3001
 
-# Starts the API on 0.0.0.0 (HOST above) and applies DB migrations when
-# DATABASE_URL is set. Same as `npm run start:host --workspace apps/backend`,
-# but node runs directly under tini: no npm/sh/tsx-CLI wrapper processes, and
-# signals reach the server. The working directory stays apps/backend, so .env
-# lookup and the relative OUTPUT_DIR resolve exactly as before.
-WORKDIR /app/apps/backend
-ENTRYPOINT ["/usr/bin/tini", "-g", "--"]
-CMD ["node", "--import", "tsx", "src/index.ts"]
+# Starts the API and applies DB migrations when DATABASE_URL is set. Same as
+# `npm run start:host --workspace apps/backend`, but node runs directly under
+# tini: no npm/sh/tsx-CLI wrapper processes, and signals reach the server.
+#  - `env -C apps/backend`: the working directory is apps/backend, exactly as
+#    with `npm --workspace`, so .env lookup and the relative OUTPUT_DIR resolve
+#    as before. WORKDIR itself stays /app, so an npm workspace command set as
+#    a start command elsewhere still works.
+#  - `HOST=0.0.0.0` on the command line, like start:host did: a HOST variable
+#    set in the platform (e.g. copied from .env.example) can't make the server
+#    bind to loopback and fail its healthcheck.
+#  - `tini -s`: also reaps as a subreaper if something else ends up as PID 1.
+# railway.json pins the same command as startCommand, so a start command set
+# in the Railway dashboard can't bypass tini. Keep the two in sync.
+ENTRYPOINT ["/usr/bin/tini", "-s", "-g", "--"]
+CMD ["env", "-C", "/app/apps/backend", "HOST=0.0.0.0", "node", "--import", "tsx", "src/index.ts"]

@@ -1,6 +1,7 @@
 {
   "$schema": "https://railway.com/railway.schema.json",
   "deploy": {
+    "startCommand": "/usr/bin/tini -s -g -- env -C /app/apps/backend HOST=0.0.0.0 node --import tsx src/index.ts",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 300,
     "restartPolicyType": "ALWAYS"

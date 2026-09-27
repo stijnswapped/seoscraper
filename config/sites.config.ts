@@ -86,10 +86,10 @@ export interface SitesConfig {
     acquireTimeoutMs: number;
     /**
      * Failed browser launches in a row (each already retried 3x) after which
-     * the process exits non-zero so the platform restarts it in a clean
-     * container. Only kicks in when the browser DID launch earlier in this
+     * the process drains and exits non-zero so the platform restarts it in a
+     * clean container. Only kicks in when the browser DID work earlier in this
      * process: a browser that never started is a build problem a restart can't
-     * fix. Callers fall back to a plain fetch meanwhile.
+     * fix. 0 = never (same as BROWSER_SELF_RESTART=false).
      */
     launchFailuresBeforeExit: number;
     /** Master switch for that self-restart (BROWSER_SELF_RESTART=false disables it). */
@@ -186,6 +186,14 @@ function envInt(name: string, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
 
+/** Like envInt, but 0 is a valid value (e.g. "never"). Unset/blank/invalid → fallback. */
+export function envNonNegativeInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw == null || raw.trim() === "") return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
+}
+
 const allowedDomainsFromEnv = envList("ALLOWED_DOMAINS");
 
 export const sitesConfig: SitesConfig = {
@@ -225,7 +233,7 @@ export const sitesConfig: SitesConfig = {
     launchTimeoutMs: envInt("BROWSER_LAUNCH_TIMEOUT_MS", 45000),
     sessionDeadlineMs: envInt("BROWSER_SESSION_DEADLINE_MS", 180000),
     acquireTimeoutMs: envInt("BROWSER_ACQUIRE_TIMEOUT_MS", 120000),
-    launchFailuresBeforeExit: envInt("BROWSER_LAUNCH_FAILURES_BEFORE_EXIT", 3),
+    launchFailuresBeforeExit: envNonNegativeInt("BROWSER_LAUNCH_FAILURES_BEFORE_EXIT", 3),
     selfRestart: envBool("BROWSER_SELF_RESTART", true),
     blockAssets: envBool("BLOCK_BROWSER_ASSETS", true),
     blockStylesheets: envBool("BLOCK_BROWSER_STYLESHEETS", false),

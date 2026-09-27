@@ -1,10 +1,12 @@
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { sitesConfig } from "../../../../config/sites.config.js";
 import { BrowserUnavailableError, CheckError } from "../types/productCheck.js";
 import { createLogger } from "../utils/logger.js";
 import { stripLocalePrefix } from "../utils/url.js";
 import { Semaphore, SemaphoreAcquireTimeoutError } from "../utils/semaphore.js";
 import { createBrowserHealth, type BrowserHealthSnapshot } from "./browserHealth.js";
+import { hasPendingJobs } from "./checkJobs.js";
+import { activeWorkCount } from "./workTracker.js";
 import {
   STEALTH_INIT_SCRIPT,
   buildRealisticHeaders,
@@ -36,10 +38,17 @@ const browserSlots = new Semaphore(sitesConfig.browser.maxConcurrency);
  */
 const BROWSER_CLOSE_WAIT_MS = 35_000;
 
-/** Launch outcomes; recycles the process when Chromium can no longer start. */
+/** How long a finished check result may wait for its poll before a restart may drop it. */
+const UNCOLLECTED_RESULT_GRACE_MS = 60_000;
+
+/**
+ * Launch outcomes; recycles the process when Chromium can no longer start. The
+ * exit waits until nothing would be cut off: no browser slot held, no
+ * listings-track run in flight, no check job running or waiting to be polled.
+ */
 const browserHealth = createBrowserHealth({
   failuresBeforeExit: sitesConfig.browser.selfRestart ? sitesConfig.browser.launchFailuresBeforeExit : 0,
-  graceMs: 30_000,
+  isBusy: () => browserSlots.inUse > 0 || activeWorkCount() > 0 || hasPendingJobs(UNCOLLECTED_RESULT_GRACE_MS),
 });
 
 /** Launch stats for /health. */
@@ -47,13 +56,19 @@ export function getBrowserHealth(): BrowserHealthSnapshot {
   return browserHealth.snapshot();
 }
 
+/** False in the last phase of a self-restart drain: turn new scrape requests away (503). */
+export function isAcceptingWork(): boolean {
+  return browserHealth.isAcceptingWork();
+}
+
 /**
  * Launch Chromium with an explicit timeout and a couple of retries, so one
  * transient failure doesn't sink the whole check. When EVERY attempt dies
  * ~100ms in with `exitCode=null, signal=SIGTRAP` and no stderr, that is not a
  * transient: Chromium hit a hard container limit (typically pids.max, filled
- * with unreaped zombie helpers). Retrying can't fix that; browserHealth
- * restarts the process once it keeps happening.
+ * with unreaped zombie helpers). Retrying can't fix that; withBrowserSession
+ * reports the outcome to browserHealth, which restarts the process once it
+ * keeps happening.
  */
 async function launchBrowserWithRetry(): Promise<Browser> {
   const { launchTimeoutMs } = sitesConfig.browser;
@@ -81,7 +96,6 @@ async function launchBrowserWithRetry(): Promise<Browser> {
           "--disable-gpu",
         ],
       });
-      browserHealth.recordLaunchSuccess();
       return launched;
     } catch (err) {
       lastErr = err;
@@ -89,15 +103,17 @@ async function launchBrowserWithRetry(): Promise<Browser> {
       if (attempt < maxAttempts) await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
     }
   }
-  const message = `Failed to launch browser after ${maxAttempts} attempts: ${(lastErr as Error)?.message ?? "unknown error"}`;
-  browserHealth.recordLaunchFailure(message);
-  throw new BrowserUnavailableError(message);
+  throw new BrowserUnavailableError(
+    `Failed to launch browser after ${maxAttempts} attempts: ${(lastErr as Error)?.message ?? "unknown error"}`,
+  );
 }
 
 export interface LoadedPage {
   finalUrl: string;
   html: string;
   title: string;
+  /** Read with a plain fetch because no headless browser could be had (fetch fallback). */
+  browserUnavailable?: boolean;
 }
 
 export interface LoadPageOptions {
@@ -188,6 +204,11 @@ export async function withBrowserSession<T>(
     }
     throw err;
   }
+  // The restart may have been decided while we queued for the slot.
+  if (browserHealth.isRecycling()) {
+    browserSlots.release();
+    throw new BrowserUnavailableError("Browser unavailable: the service is restarting to recover Chromium.");
+  }
 
   // One close per browser, shared by the deadline timer and the finally below
   // (a second browser.close() adds nothing in Playwright; it only waits).
@@ -212,36 +233,70 @@ export async function withBrowserSession<T>(
   }, browser.sessionDeadlineMs);
   killTimer.unref?.();
 
-  try {
-    browserInstance = await launchBrowserWithRetry();
-    const context = await browserInstance.newContext({
-      userAgent: browser.userAgent,
-      viewport: browser.viewport,
-      locale: "en-US",
-      timezoneId: "America/New_York",
-      extraHTTPHeaders: browser.extraHTTPHeaders,
-      ignoreHTTPSErrors: false,
-    });
-    // Hide the headless/automation tells before any site script runs.
-    await context.addInitScript(STEALTH_INIT_SCRIPT);
+  // Report this session's launch to browserHealth exactly once: failed if the
+  // browser could not be started, set up, or open its first page; working once
+  // it has opened one (a browser that starts and dies straight away counts as
+  // a failure). A session force-closed at its deadline reports nothing.
+  let healthReported = false;
+  const reportLaunch = (ok: boolean, message = ""): void => {
+    if (healthReported || timedOut) return;
+    healthReported = true;
+    if (ok) browserHealth.recordLaunchSuccess();
+    else browserHealth.recordLaunchFailure(message);
+  };
 
-    // Drop bandwidth-heavy resources we never parse (images/media/fonts, and
-    // optionally CSS). This is the single biggest proxy-bytes saver: a rendered
-    // Shopify page is mostly assets, while SEO/rank extraction only needs the
-    // HTML/JSON. JS, XHR and fetch are kept so lazy/infinite-scroll grids and
-    // products.json-driven tiles still populate.
-    if (browser.blockAssets) {
-      await context.route("**/*", (route) => {
-        if (shouldBlockResource(route.request().resourceType(), browser)) {
-          return route.abort();
-        }
-        return route.continue();
+  try {
+    let context: BrowserContext;
+    try {
+      browserInstance = await launchBrowserWithRetry();
+      context = await browserInstance.newContext({
+        userAgent: browser.userAgent,
+        viewport: browser.viewport,
+        locale: "en-US",
+        timezoneId: "America/New_York",
+        extraHTTPHeaders: browser.extraHTTPHeaders,
+        ignoreHTTPSErrors: false,
       });
+      // Hide the headless/automation tells before any site script runs.
+      await context.addInitScript(STEALTH_INIT_SCRIPT);
+
+      // Drop bandwidth-heavy resources we never parse (images/media/fonts, and
+      // optionally CSS). This is the single biggest proxy-bytes saver: a rendered
+      // Shopify page is mostly assets, while SEO/rank extraction only needs the
+      // HTML/JSON. JS, XHR and fetch are kept so lazy/infinite-scroll grids and
+      // products.json-driven tiles still populate.
+      if (browser.blockAssets) {
+        await context.route("**/*", (route) => {
+          if (shouldBlockResource(route.request().resourceType(), browser)) {
+            return route.abort();
+          }
+          return route.continue();
+        });
+      }
+    } catch (err) {
+      // Launched but died before it could be set up is as unusable as never
+      // launched: same error for callers, same count toward a restart.
+      const unavailable =
+        err instanceof BrowserUnavailableError
+          ? err
+          : new BrowserUnavailableError(`Browser started but could not be set up: ${(err as Error).message}`);
+      reportLaunch(false, unavailable.message);
+      throw unavailable;
     }
 
     const session: BrowserSession = {
       async loadPage(url: string, opts?: LoadPageOptions): Promise<LoadedPage> {
-        const page = await context.newPage();
+        let page: Page;
+        try {
+          page = await context.newPage();
+        } catch (err) {
+          // Chromium is gone (crashed, or killed at the deadline). Not a page
+          // problem, so no per-page fetch fallback in strict sessions.
+          const message = `Browser could not open a page: ${(err as Error).message}`;
+          reportLaunch(false, message);
+          throw new BrowserUnavailableError(message);
+        }
+        reportLaunch(true);
         page.setDefaultTimeout(browser.timeoutMs);
         try {
           log.info("navigating", { url });
@@ -366,39 +421,59 @@ export async function withBrowserSession<T>(
 }
 
 /**
- * A session for when no browser can be had: every render fails straight away
- * with `reason`, so loadPageOrFetch takes its direct-fetch fallback.
+ * Read a page with a plain fetch because no browser could be had, marked as
+ * such. A failed fetch stays a BrowserUnavailableError, so loadPageOrFetch
+ * doesn't fetch the same URL a second time.
  */
-function browserlessSession(reason: string): BrowserSession {
-  return {
-    async loadPage() {
-      throw new BrowserUnavailableError(reason);
-    },
-  };
+async function fetchWithoutBrowser(url: string, reason: string): Promise<LoadedPage> {
+  try {
+    return { ...(await fetchPageDirect(url)), browserUnavailable: true };
+  } catch (err) {
+    throw new BrowserUnavailableError(`${reason}; direct fetch also failed: ${(err as Error).message}`);
+  }
 }
 
 /**
- * {@link withBrowserSession}, but when Chromium can't be obtained at all (launch
- * failure, saturated pool, process restarting) run `fn` without a browser: its
- * pages load via plain fetch, which still carries the server-rendered SEO tags
- * (<title>, meta, JSON-LD). Only launch-stage failures fall through — once `fn`
- * has started, its errors propagate unchanged, so it never runs twice.
+ * {@link withBrowserSession}, but when Chromium can't be obtained (launch
+ * failure, saturated pool, process restarting) or dies before it can open a
+ * page, read the pages with a plain fetch instead. That still carries the
+ * server-rendered SEO tags (<title>, meta, JSON-LD); each such page is marked
+ * `browserUnavailable`. `fn` runs once: without a browser only when the session
+ * could not start at all; after that, other errors propagate unchanged.
  */
 export async function withBrowserSessionOrFetch<T>(
   fn: (session: BrowserSession) => Promise<T>,
   onUnavailable?: (reason: string) => void,
 ): Promise<T> {
+  let notified = false;
+  const unavailable = (reason: string): void => {
+    if (notified) return;
+    notified = true;
+    log.warn("browser unavailable; continuing with direct fetch", { reason });
+    onUnavailable?.(reason);
+  };
+
   let started = false;
   try {
     return await withBrowserSession((session) => {
       started = true;
-      return fn(session);
+      return fn({
+        async loadPage(url, opts) {
+          try {
+            return await session.loadPage(url, opts);
+          } catch (err) {
+            if (!(err instanceof BrowserUnavailableError)) throw err;
+            unavailable(err.message);
+            return fetchWithoutBrowser(url, err.message);
+          }
+        },
+      });
     });
   } catch (err) {
     if (started || !(err instanceof BrowserUnavailableError)) throw err;
-    log.warn("browser unavailable; continuing with direct fetch", { reason: err.message });
-    onUnavailable?.(err.message);
-    return fn(browserlessSession(err.message));
+    unavailable(err.message);
+    const reason = err.message;
+    return fn({ loadPage: (url) => fetchWithoutBrowser(url, reason) });
   }
 }
 
@@ -489,8 +564,14 @@ export async function fetchPageDirect(url: string): Promise<LoadedPage> {
 
 /**
  * Load a page via the headless browser, falling back to a direct fetch if the
- * browser is blocked or fails. `onFallback` is invoked (once) with the browser
- * error before the fetch is attempted, for progress/logging.
+ * browser is blocked or fails on this page. `onFallback` is invoked (once) with
+ * the browser error before the fetch is attempted, for progress/logging.
+ *
+ * No browser at all (BrowserUnavailableError) is not a page problem and is
+ * rethrown: the session decides. A {@link withBrowserSession} session fails the
+ * check (502, so API clients keep their own fallback); a
+ * {@link withBrowserSessionOrFetch} session already fetched instead. Without a
+ * session, the page is rendered in a one-shot session that falls back to fetch.
  */
 export async function loadPageOrFetch(
   url: string,
@@ -499,9 +580,11 @@ export async function loadPageOrFetch(
   onFallback?: (reason: string) => void,
 ): Promise<LoadedPage> {
   try {
-    return session ? await session.loadPage(url, opts) : await loadRenderedPage(url);
+    return session
+      ? await session.loadPage(url, opts)
+      : await withBrowserSessionOrFetch((oneShot) => oneShot.loadPage(url, { scrollProfile: "product" }));
   } catch (err) {
-    if (!(err instanceof CheckError)) throw err;
+    if (!(err instanceof CheckError) || err instanceof BrowserUnavailableError) throw err;
     onFallback?.((err as Error).message);
     return fetchPageDirect(url);
   }

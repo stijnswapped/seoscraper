@@ -19,14 +19,17 @@ field exists; check before use.
   ```
 - `ErrorCode` ∈ `"INVALID_URL" | "DOMAIN_NOT_ALLOWED" | "PAGE_LOAD_FAILED" |
   "NO_PRODUCT_DATA_FOUND" | "IMAGE_DOWNLOAD_FAILED" | "OUTPUT_WRITE_FAILED" |
-  "UNKNOWN_ERROR" | "NOT_FOUND" | "UNAUTHORIZED" | "AUTH_NOT_CONFIGURED"`.
+  "UNKNOWN_ERROR" | "NOT_FOUND" | "UNAUTHORIZED" | "AUTH_NOT_CONFIGURED" |
+  "SERVICE_RESTARTING"`.
 - HTTP status mapping:
   - `400` → `INVALID_URL`, `DOMAIN_NOT_ALLOWED` (bad input; do NOT retry unchanged).
   - `401` → `UNAUTHORIZED` (bad/missing key; do NOT retry).
   - `404` → `NOT_FOUND` (unknown id).
   - `502` → `PAGE_LOAD_FAILED`, `NO_PRODUCT_DATA_FOUND`, other scrape failures (transient; retry with backoff).
   - `500` → `UNKNOWN_ERROR` (transient; retry with backoff).
-- Retry policy: retry only `500`/`502`/network-timeout, max 2× with exponential backoff.
+  - `503` → `SERVICE_RESTARTING` (the service is restarting itself to recover its headless
+    browser; honour `Retry-After`). Only `POST /api/check-product` and `/api/listings/track`.
+- Retry policy: retry only `500`/`502`/`503`/network-timeout, max 2× with exponential backoff.
   Never retry `400`/`401`/`404`.
 
 ## Shared types
@@ -243,6 +246,7 @@ product metadata, downloads + dedupes images to disk, returns file URLs.
 | `maxPages` | integer | no | `10` | Pages to crawl for a collection URL. |
 | `proxy` | string | no | server default | Per-request proxy overriding `SCRAPE_PROXY_URL` for this scrape only. Same format/validation/redaction as the tracker's `proxy` field above. |
 | `runId` | string | no | — | Correlates with the SSE progress stream. |
+| `fetchFallback` | boolean | no | `false` | When no headless browser can be started, read the page(s) with a plain fetch instead of failing with `502 PAGE_LOAD_FAILED`. Such results carry a `BROWSER_UNAVAILABLE: …` entry in `warnings` (JavaScript-rendered content may be missing). |
 
 ### Response `200` — `responseMode:"full"`
 ```ts

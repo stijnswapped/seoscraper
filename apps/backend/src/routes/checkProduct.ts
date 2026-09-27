@@ -18,6 +18,7 @@ import {
 } from "../utils/url.js";
 import {
   loadPageOrFetch,
+  withBrowserSession,
   withBrowserSessionOrFetch,
   type BrowserSession,
 } from "../services/pageLoader.js";
@@ -49,12 +50,17 @@ import {
   awaitJob,
   generateJobId,
   getJob,
+  markJobDelivered,
   startJob,
   JOB_AWAIT_MS,
   type JobState,
 } from "../services/checkJobs.js";
 
 const log = createLogger("checkProduct");
+
+/** Warning on results read without a headless browser (fetchFallback). */
+export const BROWSER_UNAVAILABLE_WARNING =
+  "BROWSER_UNAVAILABLE: the headless browser could not be started, so this page was read with a plain fetch; JavaScript-rendered content (extra images, variants) may be missing.";
 
 /**
  * Hard wall-clock ceiling on a single check job. Kept just under
@@ -102,6 +108,9 @@ const bodySchema = z.object({
   runId: z.string().min(1).optional(),
   maxPages: z.number().int().positive().optional(),
   responseMode: z.enum(["full", "url"]).optional(),
+  // Opt in to a plain-fetch result (with a BROWSER_UNAVAILABLE warning) when no
+  // headless browser can be started, instead of a 502 PAGE_LOAD_FAILED.
+  fetchFallback: z.boolean().optional(),
   // Optional per-request proxy overriding the env proxy for this scrape only.
   proxy: z
     .string()
@@ -117,21 +126,33 @@ export interface ApiResult {
   dataUrl?: string;
 }
 
+export interface RunCheckOptions {
+  /**
+   * When no headless browser can be had (launch failure, saturated pool, the
+   * service restarting to recover Chromium), read the pages with a plain fetch
+   * instead of failing with PAGE_LOAD_FAILED (502). Off by default: existing
+   * clients keep their 502 and their own fallback. Results read this way carry
+   * a BROWSER_UNAVAILABLE warning.
+   */
+  fetchFallback?: boolean;
+}
+
 export async function runCheck(
   inputUrl: string,
   progress: ProgressReporter = () => {},
+  options: RunCheckOptions = {},
 ): Promise<ApiResult> {
   const { url, hostname } = validateAndNormalizeUrl(inputUrl);
   assertDomainAllowed(hostname);
 
   progress({ phase: "loading", message: "Rendering input URL.", url: url.toString() });
 
-  // If Chromium cannot be started at all, still run the check on a plain fetch
-  // (server-rendered title/meta/JSON-LD) instead of failing it outright.
   const onBrowserUnavailable = (reason: string) =>
     progress({ phase: "loading", message: `Browser unavailable (${reason}); continuing with direct fetch.`, url: url.toString() });
+  const withSession = <T>(fn: (session: BrowserSession) => Promise<T>): Promise<T> =>
+    options.fetchFallback ? withBrowserSessionOrFetch(fn, onBrowserUnavailable) : withBrowserSession(fn);
 
-  return withBrowserSessionOrFetch(async (session) => {
+  return withSession(async (session) => {
    const page = await loadPageOrFetch(
      url.toString(),
      { scrollProfile: guessScrollProfile(url) },
@@ -158,7 +179,7 @@ export async function runCheck(
      session,
      progress,
    );
-  }, onBrowserUnavailable);
+  });
 }
 
 function guessScrollProfile(url: URL): "product" | "listing" {
@@ -214,6 +235,7 @@ async function processProductPage(
   if (product.empty) {
     errors.push("NO_PRODUCT_DATA_FOUND: no product title, description, or structured data.");
   }
+  if (page.browserUnavailable) warnings.push(BROWSER_UNAVAILABLE_WARNING);
   collectFieldWarnings(meta, product, warnings);
 
   progress({ phase: "discovering-images", message: "Discovering product image candidates.", url: page.finalUrl });
@@ -321,6 +343,7 @@ async function runCollectionCheck(
     total: discoveredProductUrls.length,
   });
 
+  if (page.browserUnavailable) warnings.push(BROWSER_UNAVAILABLE_WARNING);
   if (discoveredProductUrls.length === 0) {
     warnings.push("No visible product links were discovered on the collection page.");
   }
@@ -474,7 +497,9 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
         progress({ phase: "queued", message: "Check request accepted.", url: parsed.data.url });
         return withJobDeadline(
           parsed.data.url,
-          runWithProxy(proxyOverride, () => runCheck(parsed.data.url, progress)),
+          runWithProxy(proxyOverride, () =>
+            runCheck(parsed.data.url, progress, { fetchFallback: parsed.data.fetchFallback ?? false }),
+          ),
         );
       },
       onSettle: async (state) => {
@@ -519,6 +544,7 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
         retryAfter: 5,
       });
     }
+    markJobDelivered(record);
     return sendJobState(request, reply, record.state, responseMode);
   });
 
@@ -552,6 +578,7 @@ export function registerCheckProductRoute(app: FastifyInstance): void {
         retryAfter: 5,
       });
     }
+    markJobDelivered(record);
     return sendJobState(request, reply, record.state, record.responseMode);
   });
 }
