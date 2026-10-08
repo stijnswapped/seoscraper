@@ -8,6 +8,7 @@ import { globalRateLimit } from "./services/rateLimit.js";
 import { sitesConfig } from "../../../config/sites.config.js";
 import { registerCheckProductRoute } from "./routes/checkProduct.js";
 import { registerListingTrackerRoutes } from "./routes/listingTracker.js";
+import { registerShopifyProductRoute } from "./routes/shopifyProduct.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerBillingRoutes } from "./routes/billing.js";
@@ -15,7 +16,7 @@ import { getBrowserHealth, isAcceptingWork } from "./services/pageLoader.js";
 import type { ErrorCode } from "./types/productCheck.js";
 
 /** Scrape endpoints refused (503) while a self-restart drains. */
-const DRAINED_ROUTES = new Set(["/api/check-product", "/api/listings/track"]);
+const DRAINED_ROUTES = new Set(["/api/check-product", "/api/listings/track", "/api/shopify-product"]);
 
 export async function buildServer(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, bodyLimit: 1_048_576, trustProxy: true });
@@ -79,6 +80,7 @@ export async function buildServer(): Promise<FastifyInstance> {
 
   registerCheckProductRoute(app);
   registerListingTrackerRoutes(app);
+  registerShopifyProductRoute(app);
   registerAdminRoutes(app);
   registerAuthRoutes(app);
   registerBillingRoutes(app);

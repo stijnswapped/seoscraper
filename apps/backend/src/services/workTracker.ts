@@ -1,8 +1,9 @@
 /**
  * Counts scrape work that is running right now and that a process exit would
- * cut off halfway (currently /api/listings/track runs; check-product jobs are
- * tracked by the job registry). The browser self-restart uses it to wait for a
- * quiet moment instead of killing requests mid-flight.
+ * cut off halfway (currently /api/listings/track runs and /api/shopify-product
+ * relays; check-product jobs are tracked by the job registry). The browser
+ * self-restart uses it to wait for a quiet moment instead of killing requests
+ * mid-flight.
  */
 let active = 0;
 

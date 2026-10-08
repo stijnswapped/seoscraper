@@ -176,6 +176,10 @@ export function estimateCheckProductUnits(): number {
   return 1;
 }
 
+export function estimateShopifyProductUnits(): number {
+  return 1;
+}
+
 function includedRemaining(overview: BillingOverview): number {
   const rem5h = overview.usage.limit5h === null ? Number.POSITIVE_INFINITY : Math.max(0, overview.usage.limit5h - overview.usage.last5h);
   const rem7d = overview.usage.limit7d === null ? Number.POSITIVE_INFINITY : Math.max(0, overview.usage.limit7d - overview.usage.last7d);

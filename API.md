@@ -28,7 +28,8 @@ field exists; check before use.
   - `502` → `PAGE_LOAD_FAILED`, `NO_PRODUCT_DATA_FOUND`, other scrape failures (transient; retry with backoff).
   - `500` → `UNKNOWN_ERROR` (transient; retry with backoff).
   - `503` → `SERVICE_RESTARTING` (the service is restarting itself to recover its headless
-    browser; honour `Retry-After`). Only `POST /api/check-product` and `/api/listings/track`.
+    browser; honour `Retry-After`). Only `POST /api/check-product`, `/api/listings/track` and
+    `/api/shopify-product`.
 - Retry policy: retry only `500`/`502`/`503`/network-timeout, max 2× with exponential backoff.
   Never retry `400`/`401`/`404`.
 
@@ -345,6 +346,60 @@ CollectionCheckResult = {
 ## 9) `GET /files/runs/<runId>/...`  — static run artifacts
 - Auth: none (unguessable run id). Serves `data.json`, `seo.json`, `images/*`, `raw/page.html`.
 - Subject to the same retention as §5.
+
+---
+
+## 10) `POST /api/shopify-product`  — plain-HTTP relay for ONE Shopify product URL
+Fetches exactly one public Shopify product URL with plain HTTP (no headless browser, no
+parsing, nothing stored) and returns what the shop answered: status + raw body. For callers
+whose own network is throttled by Shopify (HTTP 429) on these URLs.
+
+### Request body
+| field | type | required | default | meaning / constraints |
+|---|---|---|---|---|
+| `url` | string | **yes** | — | `https://<shop>/products/<handle>`, optionally ending in `.js` or `.json`, optionally behind a market/locale prefix (`/en-de/products/<handle>.js`). `https` only, no credentials, no explicit port, public hosts only. The query string is forwarded; the fragment is dropped. |
+| `proxy` | string | no | server default | Per-request proxy for this call only. Same format/validation/redaction as the tracker's `proxy` field above. |
+
+### Response `200`
+```ts
+{
+  "success": true,
+  "result": {
+    "url": string,              // the validated request URL as fetched
+    "kind": "js" | "json" | "page",   // from the path's ending: .js / .json / neither
+    "status": number,           // UPSTREAM HTTP status of the final hop (200, 404, 429, ...)
+    "finalUrl": string,         // URL that produced the answer (≠ url after redirects)
+    "retryAfter": number | null,// upstream Retry-After in seconds (integer seconds, or an
+                                //   HTTP date converted to seconds from now, min 0); null
+                                //   when absent or unparseable
+    "contentType": string,      // upstream Content-Type, or ""
+    "body": string,             // raw upstream body, UNMODIFIED (not re-serialised, not
+                                //   trimmed), when status is 2xx; "" otherwise
+    "bytes": number,            // bytes read from the upstream body (0 when status is not 2xx)
+    "via": "proxy" | "direct",  // "direct" = the request left from this server's own IP
+    "redirects": number,        // redirect hops followed (max 5)
+    "ms": number                // wall time of the whole exchange, queueing included
+  }
+}
+```
+
+### Semantics the integration MUST honor
+- **Upstream statuses are reported inside `result.status`, with HTTP `200`.** Whenever the
+  shop answered — `200`, `404`, `410`, `429`, `403`, `503`, … — the call itself succeeded:
+  `success:true`, HTTP `200`. Always branch on `result.status`, never on the HTTP status alone.
+  On `429`/`503`, wait `result.retryAfter` seconds (when not null) before asking again.
+- `body` is the shop's text as sent. For `.js`/`.json` it is a JSON *string*: parse it yourself.
+- Redirects are followed (at most 5), also across hosts (`*.myshopify.com` → the shop's own
+  domain, `www` → apex), but only to `https` URLs on public hosts.
+- **Pacing:** requests for the same hostname run one at a time, at least 300 ms apart. The
+  wait counts against the deadline, so do not fire many URLs of one shop at once.
+- **Deadline:** 12 s for the whole exchange (server-tunable: `SHOPIFY_PRODUCT_TIMEOUT_MS`).
+  Bodies over 8 MB are refused.
+- **Errors:** `400 INVALID_URL`/`DOMAIN_NOT_ALLOWED` (not such a URL; nothing was fetched),
+  `502 PAGE_LOAD_FAILED` (no answer: network failure, deadline — also while waiting for the
+  hostname's turn —, a refused redirect, more than 5 redirects, body over 8 MB),
+  `503 SERVICE_RESTARTING`, `500 UNKNOWN_ERROR`.
+- **Billing:** 1 unit when `result.status` is 2xx; nothing otherwise.
 
 ---
 

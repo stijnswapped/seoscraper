@@ -452,10 +452,15 @@ const PROXY_FETCH_TIMEOUT_MS =
  * Plain DIRECT fetch (never routed through the proxy), time-boxed like
  * {@link proxyFetch}. Used to retry a request from the origin's own IP when the
  * proxy exit IP is blocked — shared/datacenter proxy IPs are challenged by
- * Cloudflare far more often than a store's own server IP.
+ * Cloudflare far more often than a store's own server IP. `timeoutMs` lets a
+ * caller with a tighter deadline of its own shorten the wait.
  */
-export async function fetchDirect(input: string, init?: RequestInit): Promise<Response> {
-  return fetchWithTimeout(input, init, PROXY_FETCH_TIMEOUT_MS);
+export async function fetchDirect(
+  input: string,
+  init?: RequestInit,
+  timeoutMs: number = PROXY_FETCH_TIMEOUT_MS,
+): Promise<Response> {
+  return fetchWithTimeout(input, init, timeoutMs);
 }
 
 /** fetch() with a hard timeout so a hanging connection can't stall a request forever. */
@@ -473,11 +478,17 @@ async function fetchWithTimeout(input: string, init: RequestInit | undefined, ti
  * `fetch` that routes through the proxy when one is configured and healthy, and
  * transparently retries DIRECT if the proxy connection/auth fails OR times out.
  * Both attempts are time-boxed so a slow/hanging proxy can never stall the
- * request indefinitely (this is what caused tracking to hang).
+ * request indefinitely (this is what caused tracking to hang). `timeoutMs`
+ * applies to EACH attempt; the timer stops once the response headers arrive, so
+ * a caller that needs the body read bounded too has to do that itself.
  */
-export async function proxyFetch(input: string, init?: RequestInit): Promise<Response> {
+export async function proxyFetch(
+  input: string,
+  init?: RequestInit,
+  timeoutMs: number = PROXY_FETCH_TIMEOUT_MS,
+): Promise<Response> {
   const dispatcher = isProxyHealthy() ? await getProxyDispatcher() : null;
-  if (!dispatcher) return fetchWithTimeout(input, init, PROXY_FETCH_TIMEOUT_MS);
+  if (!dispatcher) return fetchWithTimeout(input, init, timeoutMs);
 
   // Rotating: retry through the gateway (new exit IP each attempt) before giving
   // up, and never trip the cooldown. Static: a single failure → direct + cooldown.
@@ -486,12 +497,12 @@ export async function proxyFetch(input: string, init?: RequestInit): Promise<Res
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
-      const res = await fetchWithTimeout(input, { ...init, dispatcher } as RequestInit, PROXY_FETCH_TIMEOUT_MS);
+      const res = await fetchWithTimeout(input, { ...init, dispatcher } as RequestInit, timeoutMs);
       if (res.status === 407) {
         // Auth failure won't fix itself by retrying, and a fresh exit IP can't
         // fix credentials either — so this disables rotating pools as well.
         markProxyBroken("proxyFetch", "HTTP 407 proxy authentication required");
-        return fetchWithTimeout(input, init, PROXY_FETCH_TIMEOUT_MS);
+        return fetchWithTimeout(input, init, timeoutMs);
       }
       return res;
     } catch (err) {
@@ -503,5 +514,5 @@ export async function proxyFetch(input: string, init?: RequestInit): Promise<Res
   // of exit-IP rotation fixes. Mark it broken so the browser tier stops
   // attaching it too, then serve this request direct.
   markProxyBroken("proxyFetch", (lastErr as Error)?.message);
-  return fetchWithTimeout(input, init, PROXY_FETCH_TIMEOUT_MS);
+  return fetchWithTimeout(input, init, timeoutMs);
 }
